@@ -9,6 +9,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
+experiments/.venv_align/
 
 # OS
 .DS_Store

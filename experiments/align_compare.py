@@ -206,17 +206,22 @@ def _occurrences_from_tokens(tokens: list[dict], word: str, match_type: str) -> 
     return occ
 
 
-def whisperx_align(audio_path: Path, word: str) -> AlignmentResult:
+def whisperx_align(audio_path: Path, transcript: str, word: str) -> AlignmentResult:
     try:
         import torch
         import typing
         import collections
+        import numpy as np
         from omegaconf import listconfig, dictconfig, base, nodes as oc_nodes
         import whisperx
+        from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
     except Exception as e:
         return AlignmentResult("whisperx", "error", f"missing deps: {e}", [])
 
     try:
+        # Restore deprecated alias for older dependencies.
+        if not hasattr(np, "NaN"):
+            np.NaN = np.nan
         safe_nodes = [v for v in vars(oc_nodes).values() if isinstance(v, type)]
         torch.serialization.add_safe_globals([
             listconfig.ListConfig,
@@ -240,12 +245,27 @@ def whisperx_align(audio_path: Path, word: str) -> AlignmentResult:
             kwargs.setdefault("weights_only", False)
             return orig_load(*args, **kwargs)
         torch.load = _patched_load
+        # Force safetensors to avoid torch.load restrictions on older torch.
+        orig_from_pretrained = Wav2Vec2ForCTC.from_pretrained
+        def _safe_from_pretrained(*args, **kwargs):
+            kwargs.setdefault("use_safetensors", True)
+            return orig_from_pretrained(*args, **kwargs)
+        Wav2Vec2ForCTC.from_pretrained = _safe_from_pretrained
+        if not hasattr(Wav2Vec2Processor, "sampling_rate"):
+            def _sampling_rate(self):
+                fe = getattr(self, "feature_extractor", None)
+                return getattr(fe, "sampling_rate", None)
+            Wav2Vec2Processor.sampling_rate = property(_sampling_rate)
         device = "cpu"
-        model = whisperx.load_model("small", device, compute_type="int8")
         audio = whisperx.load_audio(str(audio_path))
-        result = model.transcribe(audio, batch_size=8)
-        model_a, metadata = whisperx.load_align_model(language_code=result["language"], device=device)
-        result = whisperx.align(result["segments"], model_a, metadata, audio, device)
+        duration = audio.shape[0] / whisperx.audio.SAMPLE_RATE
+        segments = [{
+            "start": 0.0,
+            "end": float(duration),
+            "text": transcript,
+        }]
+        model_a, metadata = whisperx.load_align_model(language_code="zh", device=device)
+        result = whisperx.align(segments, model_a, metadata, audio, device)
     except Exception as e:
         return AlignmentResult("whisperx", "error", str(e), [])
 
@@ -373,7 +393,7 @@ def main():
     results.append(whispercpp_native(audio_path, word))
     results.append(mms_char_align(audio_path, fun_text, word))
     results.append(mms_pinyin_align(audio_path, fun_text, word))
-    results.append(whisperx_align(audio_path, word))
+    results.append(whisperx_align(audio_path, fun_text, word))
     results.append(stable_ts_align(audio_path, fun_text, word))
 
     work_dir = Path("/tmp/align_compare")
