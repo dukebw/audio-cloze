@@ -1,0 +1,112 @@
+{
+  "sample": {
+    "sample_id": "pod_631ec155_610",
+    "source_type": "podcast",
+    "source_id": "631ec1551bb5c2f6",
+    "title": "EP499 TAXI DRIVER (explicit @ 610s)",
+    "channel": "台灣通勤第一品牌",
+    "audio_path": "audio/pod_631ec155_610.mp3",
+    "start_time": 610.0,
+    "duration": 45
+  },
+  "word": "答案",
+  "funasr_text": "扣了扣了扣了，我也跟他说那可能是个两克拉的钻石，然后可能对方要求婚很急，然后忘在台北的豪宅。对啊，你喜欢这答案吗？对啊，你喜欢这答案吗？看凌晨3点无聊，凌晨3点时候到，女朋友睡着不睡。哎，恭喜你，请你嫁给我吧。哪位小朋友说，哎，你的驾驶的戒指我出我出我出我出我出，你觉得呢？你怎么会这么好笑？可当下司机笑不出来啊，我也不觉得好笑，我只是觉得你你觉得。哈哈哈，我就问你觉得嘛，快点，在一个路口我就要下车了，你赶快跟我讲啊，所以在趁他弯道那个转角。",
+  "whisper_text": "我可以跟他說那可能是個兩顆拉的鑽石然後可能對媽媽求婚很急然後忘在台北的豪宅你喜歡這答案嗎你問真好耶對 你喜歡這個答案嗎這答案真無聊凌晨三點收到女朋友睡著不睡恭喜你 請你嫁給我吧然後有些朋友說欸你的價值人你戒指人我輸我輸我輸我輸我輸你覺得呢你怎麼會這麼好笑可是當下司機笑不出來啊我也不覺得好笑我只覺得你覺得我就問你覺得嘛快點在一個路口我就要下車了你趕快跟我講啊所以在趁他彎道那轉角",
+  "results": [
+    {
+      "method": "whispercpp_native",
+      "status": "ok",
+      "error": null,
+      "occurrences": [
+        {
+          "start": 6.64,
+          "end": 7.06,
+          "text": "你喜歡這答案嗎",
+          "confidence": 0.9849475,
+          "found_variant": "答案",
+          "match_type": "exact"
+        },
+        {
+          "start": 2.55,
+          "end": 2.8,
+          "text": "對 你喜歡這個答案嗎",
+          "confidence": 0.8495705,
+          "found_variant": "答案",
+          "match_type": "exact"
+        },
+        {
+          "start": 3.09,
+          "end": 3.55,
+          "text": "這答案真無聊",
+          "confidence": 0.772968,
+          "found_variant": "答案",
+          "match_type": "exact"
+        }
+      ]
+    },
+    {
+      "method": "mms_char",
+      "status": "ok",
+      "error": null,
+      "occurrences": []
+    },
+    {
+      "method": "mms_pinyin",
+      "status": "ok",
+      "error": null,
+      "occurrences": [
+        {
+          "start": 6.881987555555555,
+          "end": 7.10205111111111,
+          "text": "答案",
+          "confidence": 0.33310097455978394,
+          "found_variant": "答案",
+          "match_type": "pinyin"
+        },
+        {
+          "start": 13.643940444444443,
+          "end": 13.904015555555553,
+          "text": "答案",
+          "confidence": 0.15002276003360748,
+          "found_variant": "答案",
+          "match_type": "pinyin"
+        }
+      ]
+    },
+    {
+      "method": "whisperx",
+      "status": "error",
+      "error": "Weights only load failed. This file can still be loaded, to do so you have two options, \u001b[1mdo those steps only if you trust the source of the checkpoint\u001b[0m. \n\t(1) In PyTorch 2.6, we changed the default value of the `weights_only` argument in `torch.load` from `False` to `True`. Re-running `torch.load` with `weights_only` set to `False` will likely succeed, but it can result in arbitrary code execution. Do it only if you got the file from a trusted source.\n\t(2) Alternatively, to load with `weights_only=True` please check the recommended steps in the following error message.\n\tWeightsUnpickler error: Unsupported global: GLOBAL pyannote.audio.core.model.Introspection was not an allowed global by default. Please use `torch.serialization.add_safe_globals([pyannote.audio.core.model.Introspection])` or the `torch.serialization.safe_globals([pyannote.audio.core.model.Introspection])` context manager to allowlist this global if you trust this class/function.\n\nCheck the documentation of torch.load to learn more about types accepted by default with weights_only https://pytorch.org/docs/stable/generated/torch.load.html.",
+      "occurrences": []
+    },
+    {
+      "method": "stable_ts",
+      "status": "ok",
+      "error": null,
+      "occurrences": [
+        {
+          "start": 6.84,
+          "end": 7.1,
+          "text": "答案",
+          "confidence": 0.9995478987693787,
+          "found_variant": "答案",
+          "match_type": "stable_ts"
+        },
+        {
+          "start": 13.54,
+          "end": 13.96,
+          "text": "答案",
+          "confidence": 0.9705621004104614,
+          "found_variant": "答案",
+          "match_type": "stable_ts"
+        }
+      ]
+    },
+    {
+      "method": "mfa",
+      "status": "skip",
+      "error": "mfa binary not found",
+      "occurrences": []
+    }
+  ]
+}
