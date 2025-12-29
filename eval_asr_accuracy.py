@@ -31,6 +31,7 @@ WHISPER_MODEL_PATH = Path(__file__).parent / "models" / "ggml-large-v3.bin"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 EVAL_DIR = Path(__file__).parent / "eval_samples"
+DEFAULT_AUDIO_SUBDIR = "audio"
 RESULTS_FILE = EVAL_DIR / "eval_results.json"
 HTML_FILE = EVAL_DIR / "eval_compare.html"
 
@@ -84,6 +85,30 @@ class EvalResult:
     """Complete evaluation result for a sample."""
     sample: Sample
     transcriptions: dict  # backend -> TranscriptionResult
+
+
+def resolve_audio_dir(audio_dir_arg: str) -> Path:
+    audio_dir = Path(audio_dir_arg).expanduser()
+    if not audio_dir.is_absolute():
+        audio_dir = EVAL_DIR / audio_dir
+    return audio_dir
+
+
+def relative_audio_path(audio_path: Path) -> str:
+    try:
+        return str(audio_path.relative_to(EVAL_DIR))
+    except ValueError:
+        return str(audio_path)
+
+
+def resolve_audio_path(audio_path: str, audio_dir: Path) -> Path:
+    path = Path(audio_path).expanduser()
+    if path.is_absolute():
+        return path
+    candidate = EVAL_DIR / path
+    if candidate.exists():
+        return candidate
+    return audio_dir / path.name
 
 
 def get_random_youtube_samples(conn: sqlite3.Connection, n: int) -> list[dict]:
@@ -882,6 +907,8 @@ def main():
                         help="Number of YouTube samples to evaluate")
     parser.add_argument("--num-podcast", type=int, default=NUM_PODCAST_SAMPLES,
                         help="Number of podcast samples to evaluate")
+    parser.add_argument("--audio-dir", default=DEFAULT_AUDIO_SUBDIR,
+                        help="Audio cache directory (relative to eval_samples unless absolute)")
     parser.add_argument("--backends", default=",".join(spec.key for spec in BACKEND_SPECS),
                         help="Comma-separated backend keys to run")
     args = parser.parse_args()
@@ -899,6 +926,8 @@ def main():
 
     # Create eval directory
     EVAL_DIR.mkdir(parents=True, exist_ok=True)
+    audio_dir = resolve_audio_dir(args.audio_dir)
+    audio_dir.mkdir(parents=True, exist_ok=True)
 
     results: list[EvalResult] = []
     existing_results = [] if args.fresh else load_existing_results()
@@ -908,7 +937,14 @@ def main():
         results = existing_results
         for i, result in enumerate(results):
             sample = result.sample
-            audio_path = EVAL_DIR / sample.audio_path
+            audio_path = resolve_audio_path(sample.audio_path, audio_dir)
+            if audio_path.exists():
+                try:
+                    rel_path = audio_path.relative_to(EVAL_DIR)
+                    if sample.audio_path != str(rel_path):
+                        sample.audio_path = str(rel_path)
+                except ValueError:
+                    pass
             print(f"\n[{i+1}/{len(results)}] {sample.title[:50]}...")
             if not audio_path.exists():
                 print(f"  Missing audio: {audio_path.name} (skipping)")
@@ -944,7 +980,7 @@ def main():
         for i, yt in enumerate(youtube_samples):
             print(f"\n[{i+1}/{len(youtube_samples)}] {yt['title'][:50]}...")
             sample_id = f"yt_{yt['video_id']}_{int(yt['start_time'])}"
-            audio_path = EVAL_DIR / f"{sample_id}.mp3"
+            audio_path = audio_dir / f"{sample_id}.mp3"
 
             if not audio_path.exists():
                 print(f"  Downloading {SAMPLE_DURATION}s from {yt['start_time']:.0f}s...")
@@ -958,7 +994,7 @@ def main():
                 source_id=yt['video_id'],
                 title=yt['title'],
                 channel=yt['channel'],
-                audio_path=audio_path.name,
+                audio_path=relative_audio_path(audio_path),
                 start_time=yt['start_time'],
                 duration=SAMPLE_DURATION
             )
@@ -982,7 +1018,7 @@ def main():
         for i, pod in enumerate(podcast_samples):
             print(f"\n[{i+1}/{len(podcast_samples)}] {pod['title'][:50]}...")
             sample_id = f"pod_{pod['episode_id'][:8]}_{int(pod['start_time'])}"
-            audio_path = EVAL_DIR / f"{sample_id}.mp3"
+            audio_path = audio_dir / f"{sample_id}.mp3"
 
             if not audio_path.exists():
                 print(f"  Downloading {SAMPLE_DURATION}s from {pod['start_time']:.0f}s...")
@@ -996,7 +1032,7 @@ def main():
                 source_id=pod['episode_id'],
                 title=pod['title'],
                 channel=pod['channel'],
-                audio_path=audio_path.name,
+                audio_path=relative_audio_path(audio_path),
                 start_time=pod['start_time'],
                 duration=SAMPLE_DURATION
             )

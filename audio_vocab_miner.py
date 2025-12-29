@@ -205,6 +205,38 @@ def normalize_zh(s: str) -> str:
     return s.lower()
 
 
+FUZZY_MAX_GAP = 4
+
+
+def is_cjk_text(text: str) -> bool:
+    return any('\u4e00' <= ch <= '\u9fff' for ch in text)
+
+
+def build_fuzzy_like_pattern(word: str) -> Optional[str]:
+    """Build a SQL LIKE pattern that allows gaps between CJK characters."""
+    if not is_cjk_text(word):
+        return None
+    cleaned = ''.join(ch for ch in word if not ch.isspace())
+    if len(cleaned) < 2:
+        return None
+    return f"%{'%'.join(cleaned)}%"
+
+
+def build_fuzzy_regex(word: str, max_gap: int = FUZZY_MAX_GAP) -> Optional[re.Pattern]:
+    """Build a regex that allows up to max_gap chars between CJK characters."""
+    if not is_cjk_text(word):
+        return None
+    cleaned = ''.join(ch for ch in word if not ch.isspace())
+    if len(cleaned) < 2:
+        return None
+    gap = f".{{0,{max_gap}}}"
+    pattern = gap.join(re.escape(ch) for ch in cleaned)
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return None
+
+
 def get_word_variants(word: str) -> list[str]:
     """Get both simplified and traditional variants of a word."""
     traditional = _s2t.convert(word)
@@ -215,6 +247,53 @@ def get_word_variants(word: str) -> list[str]:
     if simplified != word and simplified not in variants:
         variants.append(simplified)
     return variants
+
+
+def build_search_patterns(word: str) -> tuple[list[tuple[str, str, str]], list[tuple[str, str, str]]]:
+    """Return exact and fuzzy LIKE patterns for variants."""
+    exact = []
+    fuzzy = []
+    for variant in get_word_variants(word):
+        exact.append((variant, f"%{variant}%", "exact"))
+        fuzzy_pattern = build_fuzzy_like_pattern(variant)
+        if fuzzy_pattern and fuzzy_pattern != f"%{variant}%":
+            fuzzy.append((variant, fuzzy_pattern, "fuzzy"))
+    return exact, fuzzy
+
+
+def find_word_spans(text: str, word: str, allow_fuzzy: bool = True) -> list[dict]:
+    """Find exact or fuzzy spans for a word within text."""
+    spans = []
+    for variant in get_word_variants(word):
+        start = 0
+        while True:
+            idx = text.find(variant, start)
+            if idx == -1:
+                break
+            spans.append({
+                "start": idx,
+                "end": idx + len(variant),
+                "variant": variant,
+                "match": "exact",
+            })
+            start = idx + 1
+
+    if spans or not allow_fuzzy:
+        return spans
+
+    for variant in get_word_variants(word):
+        pattern = build_fuzzy_regex(variant)
+        if not pattern:
+            continue
+        for match in pattern.finditer(text):
+            spans.append({
+                "start": match.start(),
+                "end": match.end(),
+                "variant": variant,
+                "match": "fuzzy",
+            })
+
+    return spans
 
 
 def timestamp_to_seconds(ts: str) -> float:
@@ -777,8 +856,6 @@ def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
         json_file.unlink(missing_ok=True)
         return []
 
-    # Get word variants (simplified/traditional)
-    variants = get_word_variants(word)
     occurrences = []
 
     # Extract word-level timestamps from whisper.cpp JSON
@@ -790,36 +867,42 @@ def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
         words = []
         for token in tokens:
             if "text" in token and "offsets" in token:
+                token_text = token["text"].strip()
+                if not token_text:
+                    continue
                 words.append({
-                    "word": token["text"].strip(),
+                    "text": token_text,
                     "start": token["offsets"]["from"] / 1000.0,
                     "end": token["offsets"]["to"] / 1000.0,
                     "probability": token.get("p", 0.5),
                 })
 
-        for i, word_info in enumerate(words):
-            word_text = word_info["word"]
+        if not words:
+            continue
 
-            # Check if any variant appears in this word or surrounding context
-            found_variant = None
-            for variant in variants:
-                if variant in word_text:
-                    found_variant = variant
-                    break
-                # Check surrounding words for multi-character matches
-                context = ''.join(w["word"] for w in words[max(0, i-2):i+3])
-                if variant in context:
-                    found_variant = variant
-                    break
+        full_text = ''.join(w["text"] for w in words)
+        char_to_word = []
+        for idx, word_info in enumerate(words):
+            char_to_word.extend([idx] * len(word_info["text"]))
 
-            if found_variant:
-                occurrences.append({
-                    'start': word_info["start"],
-                    'end': word_info["end"],
-                    'text': segment_text,
-                    'confidence': word_info["probability"],
-                    'found_variant': found_variant,
-                })
+        spans = find_word_spans(full_text, word, allow_fuzzy=True)
+        for span in spans:
+            start_char = span["start"]
+            end_char = span["end"] - 1
+            if start_char < 0 or end_char >= len(char_to_word):
+                continue
+            start_word_idx = char_to_word[start_char]
+            end_word_idx = char_to_word[end_char]
+            probs = [words[i]["probability"] for i in range(start_word_idx, end_word_idx + 1)]
+            confidence = sum(probs) / len(probs) if probs else 0.5
+            occurrences.append({
+                'start': words[start_word_idx]["start"],
+                'end': words[end_word_idx]["end"],
+                'text': segment_text,
+                'confidence': confidence,
+                'found_variant': span["variant"],
+                'match_type': span["match"],
+            })
 
     # Clean up temp files
     wav_path.unlink(missing_ok=True)
@@ -832,7 +915,7 @@ def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
 
 
 def smart_asr_localize(audio_url: str, word: str, duration: float,
-                        temp_dir: Path, backend: str = 'whispercpp',
+                        temp_dir: Path, backend: str = 'funasr_nano',
                         conn: sqlite3.Connection = None) -> list[dict]:
     """Smart ASR: chunk long episodes to avoid full transcription.
 
@@ -889,7 +972,7 @@ def smart_asr_localize(audio_url: str, word: str, duration: float,
 # =============================================================================
 
 # Available backends: 'whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'
-DEFAULT_ASR_BACKEND = 'whispercpp'
+DEFAULT_ASR_BACKEND = 'funasr_nano'
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 GLM_ASR_ENDPOINT = "http://127.0.0.1:8000/v1"  # Optional OpenAI-compatible endpoint
@@ -1115,38 +1198,34 @@ def align_transcript_to_audio(audio_path: Path, transcript: str, word: str) -> l
                 char_idx += 1
 
     # Find word occurrences in character spans
-    variants = get_word_variants(word)
     occurrences = []
-
     full_text = ''.join(s['char'] for s in char_spans)
-    for variant in variants:
-        idx = 0
-        while True:
-            pos = full_text.find(variant, idx)
-            if pos == -1:
-                break
+    spans = find_word_spans(full_text, word, allow_fuzzy=True)
 
-            # Get timing from character spans
-            word_chars = char_spans[pos:pos + len(variant)]
-            if word_chars:
-                start = word_chars[0]['start']
-                end = word_chars[-1]['end']
-                confidence = sum(s['score'] for s in word_chars) / len(word_chars)
+    for span in spans:
+        pos = span["start"]
+        end_pos = span["end"]
 
-                # Get surrounding context
-                context_start = max(0, pos - 10)
-                context_end = min(len(char_spans), pos + len(variant) + 10)
-                context = ''.join(s['char'] for s in char_spans[context_start:context_end])
+        # Get timing from character spans
+        word_chars = char_spans[pos:end_pos]
+        if word_chars:
+            start = word_chars[0]['start']
+            end = word_chars[-1]['end']
+            confidence = sum(s['score'] for s in word_chars) / len(word_chars)
 
-                occurrences.append({
-                    'start': start,
-                    'end': end,
-                    'text': context,
-                    'confidence': confidence,
-                    'found_variant': variant,
-                })
+            # Get surrounding context
+            context_start = max(0, pos - 10)
+            context_end = min(len(char_spans), end_pos + 10)
+            context = ''.join(s['char'] for s in char_spans[context_start:context_end])
 
-            idx = pos + 1
+            occurrences.append({
+                'start': start,
+                'end': end,
+                'text': context,
+                'confidence': confidence,
+                'found_variant': span["variant"],
+                'match_type': span["match"],
+            })
 
     log.info(f"  Alignment found {len(occurrences)} occurrences of '{word}'")
     return occurrences
@@ -1168,9 +1247,8 @@ def localize_word_with_backend(audio_path: Path, word: str, backend: str,
     if not transcript:
         return []
 
-    # Check if word appears in transcript
-    variants = get_word_variants(word)
-    if not any(v in transcript for v in variants):
+    # Check if word appears in transcript (exact or fuzzy)
+    if not find_word_spans(transcript, word, allow_fuzzy=True):
         log.info(f"  Word '{word}' not found in transcript")
         return []
 
@@ -1284,131 +1362,146 @@ def cmd_index(args):
 
 def search_youtube_captions(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
     """Search YouTube captions (Phase 1: subtitle timing, high confidence)."""
-    variants = get_word_variants(word)
+    exact_patterns, fuzzy_patterns = build_search_patterns(word)
     results = []
     seen_videos = set()
 
-    for variant in variants:
-        like_pattern = f'%{variant}%'
-        try:
-            rows = conn.execute("""
-                SELECT c.video_id, c.channel, c.start_time, c.end_time, c.text,
-                       v.title, v.subtitle_type
-                FROM captions c
-                JOIN videos v ON c.video_id = v.video_id
-                WHERE c.text LIKE ?
-                ORDER BY
-                    CASE WHEN v.subtitle_type = 'manual' THEN 0 ELSE 1 END,
-                    c.start_time
-                LIMIT ?
-            """, (like_pattern, limit * 2)).fetchall()
+    def run_patterns(patterns: list[tuple[str, str, str]]):
+        for variant, like_pattern, match_type in patterns:
+            try:
+                rows = conn.execute("""
+                    SELECT c.video_id, c.channel, c.start_time, c.end_time, c.text,
+                           v.title, v.subtitle_type
+                    FROM captions c
+                    JOIN videos v ON c.video_id = v.video_id
+                    WHERE c.text LIKE ?
+                    ORDER BY
+                        CASE WHEN v.subtitle_type = 'manual' THEN 0 ELSE 1 END,
+                        c.start_time
+                    LIMIT ?
+                """, (like_pattern, limit * 2)).fetchall()
 
-            for row in rows:
-                video_id = row[0]
-                if video_id not in seen_videos:
-                    seen_videos.add(video_id)
-                    results.append({
-                        'video_id': video_id,
-                        'channel': row[1],
-                        'start': float(row[2]),
-                        'end': float(row[3]),
-                        'context': row[4],
-                        'title': row[5],
-                        'subtitle_type': row[6],
-                        'found_variant': variant,
-                        'source_type': 'youtube',
-                        'timing_confidence': 'subtitle',
-                        'requires_asr': False,
-                    })
-        except sqlite3.OperationalError as e:
-            log.warning(f"YouTube caption query error: {e}")
+                for row in rows:
+                    video_id = row[0]
+                    if video_id not in seen_videos:
+                        seen_videos.add(video_id)
+                        results.append({
+                            'video_id': video_id,
+                            'channel': row[1],
+                            'start': float(row[2]),
+                            'end': float(row[3]),
+                            'context': row[4],
+                            'title': row[5],
+                            'subtitle_type': row[6],
+                            'found_variant': variant,
+                            'match_type': match_type,
+                            'source_type': 'youtube',
+                            'timing_confidence': 'subtitle',
+                            'requires_asr': False,
+                        })
+            except sqlite3.OperationalError as e:
+                log.warning(f"YouTube caption query error: {e}")
+
+    run_patterns(exact_patterns)
+    if not results and fuzzy_patterns:
+        run_patterns(fuzzy_patterns)
 
     return results[:limit]
 
 
 def search_podcast_notes(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
     """Search podcast show notes (Phase 1: text hit, needs ASR for timing)."""
-    variants = get_word_variants(word)
+    exact_patterns, fuzzy_patterns = build_search_patterns(word)
     results = []
     seen_episodes = set()
 
-    for variant in variants:
-        like_pattern = f'%{variant}%'
-        try:
-            rows = conn.execute("""
-                SELECT en.episode_id, en.channel, en.text,
-                       e.title, e.audio_url, e.duration
-                FROM episode_notes en
-                JOIN episodes e ON en.episode_id = e.episode_id
-                WHERE en.text LIKE ?
-                LIMIT ?
-            """, (like_pattern, limit * 2)).fetchall()
+    def run_patterns(patterns: list[tuple[str, str, str]]):
+        for variant, like_pattern, match_type in patterns:
+            try:
+                rows = conn.execute("""
+                    SELECT en.episode_id, en.channel, en.text,
+                           e.title, e.audio_url, e.duration
+                    FROM episode_notes en
+                    JOIN episodes e ON en.episode_id = e.episode_id
+                    WHERE en.text LIKE ?
+                    LIMIT ?
+                """, (like_pattern, limit * 2)).fetchall()
 
-            for row in rows:
-                episode_id = row[0]
-                if episode_id not in seen_episodes:
-                    seen_episodes.add(episode_id)
-                    results.append({
-                        'video_id': episode_id,  # Use video_id for compatibility
-                        'episode_id': episode_id,
-                        'channel': row[1],
-                        'context': row[2][:200],  # Show notes snippet
-                        'title': row[3],
-                        'audio_url': row[4],
-                        'duration': row[5] or 0,
-                        'found_variant': variant,
-                        'source_type': 'podcast',
-                        'timing_confidence': 'text_only',
-                        'requires_asr': True,
-                        # Timing will be filled in by ASR
-                        'start': None,
-                        'end': None,
-                    })
-        except sqlite3.OperationalError as e:
-            log.warning(f"Podcast notes query error: {e}")
+                for row in rows:
+                    episode_id = row[0]
+                    if episode_id not in seen_episodes:
+                        seen_episodes.add(episode_id)
+                        results.append({
+                            'video_id': episode_id,  # Use video_id for compatibility
+                            'episode_id': episode_id,
+                            'channel': row[1],
+                            'context': row[2][:200],  # Show notes snippet
+                            'title': row[3],
+                            'audio_url': row[4],
+                            'duration': row[5] or 0,
+                            'found_variant': variant,
+                            'match_type': match_type,
+                            'source_type': 'podcast',
+                            'timing_confidence': 'text_only',
+                            'requires_asr': True,
+                            # Timing will be filled in by ASR
+                            'start': None,
+                            'end': None,
+                        })
+            except sqlite3.OperationalError as e:
+                log.warning(f"Podcast notes query error: {e}")
+
+    run_patterns(exact_patterns)
+    if not results and fuzzy_patterns:
+        run_patterns(fuzzy_patterns)
 
     return results[:limit]
 
 
 def search_wenetspeech(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
     """Search WenetSpeech corpus (pre-transcribed, high confidence timing)."""
-    variants = get_word_variants(word)
+    exact_patterns, fuzzy_patterns = build_search_patterns(word)
     results = []
     seen_segments = set()
 
-    for variant in variants:
-        like_pattern = f'%{variant}%'
-        try:
-            rows = conn.execute("""
-                SELECT ws.segment_id, ws.audio_path, ws.start_time, ws.end_time,
-                       ws.text, ws.speaker_id, ws.confidence, ws.domain
-                FROM wenetspeech_segments ws
-                WHERE ws.text LIKE ?
-                ORDER BY ws.confidence DESC
-                LIMIT ?
-            """, (like_pattern, limit * 2)).fetchall()
+    def run_patterns(patterns: list[tuple[str, str, str]]):
+        for variant, like_pattern, match_type in patterns:
+            try:
+                rows = conn.execute("""
+                    SELECT ws.segment_id, ws.audio_path, ws.start_time, ws.end_time,
+                           ws.text, ws.speaker_id, ws.confidence, ws.domain
+                    FROM wenetspeech_segments ws
+                    WHERE ws.text LIKE ?
+                    ORDER BY ws.confidence DESC
+                    LIMIT ?
+                """, (like_pattern, limit * 2)).fetchall()
 
-            for row in rows:
-                segment_id = row[0]
-                if segment_id not in seen_segments:
-                    seen_segments.add(segment_id)
-                    results.append({
-                        'video_id': segment_id,  # Use video_id for compatibility
-                        'segment_id': segment_id,
-                        'audio_path': row[1],
-                        'start': float(row[2]),
-                        'end': float(row[3]),
-                        'context': row[4],
-                        'channel': row[7] or 'WenetSpeech',  # domain as channel
-                        'title': f"WenetSpeech: {row[4][:30]}...",
-                        'confidence': row[6],
-                        'found_variant': variant,
-                        'source_type': 'wenetspeech',
-                        'timing_confidence': 'asr_verified',
-                        'requires_asr': False,
-                    })
-        except sqlite3.OperationalError as e:
-            log.warning(f"WenetSpeech query error: {e}")
+                for row in rows:
+                    segment_id = row[0]
+                    if segment_id not in seen_segments:
+                        seen_segments.add(segment_id)
+                        results.append({
+                            'video_id': segment_id,  # Use video_id for compatibility
+                            'segment_id': segment_id,
+                            'audio_path': row[1],
+                            'start': float(row[2]),
+                            'end': float(row[3]),
+                            'context': row[4],
+                            'channel': row[7] or 'WenetSpeech',  # domain as channel
+                            'title': f"WenetSpeech: {row[4][:30]}...",
+                            'confidence': row[6],
+                            'found_variant': variant,
+                            'match_type': match_type,
+                            'source_type': 'wenetspeech',
+                            'timing_confidence': 'asr_verified',
+                            'requires_asr': False,
+                        })
+            except sqlite3.OperationalError as e:
+                log.warning(f"WenetSpeech query error: {e}")
+
+    run_patterns(exact_patterns)
+    if not results and fuzzy_patterns:
+        run_patterns(fuzzy_patterns)
 
     return results[:limit]
 
@@ -1531,7 +1624,7 @@ class AudioClip:
 
 
 def create_clip_from_hit(word: str, hit: dict, output_dir: Path,
-                         temp_dir: Path = None, backend: str = 'whispercpp',
+                         temp_dir: Path = None, backend: str = 'funasr_nano',
                          conn: sqlite3.Connection = None) -> Optional[AudioClip]:
     """Create audio clip from a search hit (supports multiple source types)."""
     source_type = hit.get('source_type', 'youtube')
@@ -1595,7 +1688,7 @@ def _create_youtube_clip(word: str, hit: dict, output_dir: Path) -> Optional[Aud
 
 
 def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
-                         temp_dir: Path = None, backend: str = 'whispercpp',
+                         temp_dir: Path = None, backend: str = 'funasr_nano',
                          conn: sqlite3.Connection = None) -> Optional[AudioClip]:
     """Create clip from podcast source (requires ASR for timing)."""
     episode_id = hit['episode_id']
@@ -1735,7 +1828,7 @@ def _create_wenetspeech_clip(word: str, hit: dict, output_dir: Path) -> Optional
 def process_word_from_index(conn: sqlite3.Connection, word: str,
                            output_dir: Path, max_clips: int = 2,
                            sources: list[str] = None,
-                           backend: str = 'whispercpp') -> list[AudioClip]:
+                           backend: str = 'funasr_nano') -> list[AudioClip]:
     """Process a word using the unified multi-source index."""
     log.info(f"\n{'='*60}")
     log.info(f"MINING: {word}")
@@ -1788,7 +1881,7 @@ def cmd_mine(args):
         return
 
     # Get ASR backend (convert CLI arg format)
-    backend = getattr(args, 'asr_backend', 'whispercpp').replace('-', '_')
+    backend = getattr(args, 'asr_backend', DEFAULT_ASR_BACKEND).replace('-', '_')
 
     # Set GLM endpoint if using GLM-ASR
     if backend == 'glm_asr' and hasattr(args, 'glm_endpoint'):
@@ -2334,9 +2427,9 @@ Examples:
     mine_parser.add_argument('--db', default='vocab.db', help='Database path')
     mine_parser.add_argument('-o', '--output', default='./audio_clips', help='Output directory')
     mine_parser.add_argument('-n', '--num-clips', type=int, default=2, help='Clips per word')
-    mine_parser.add_argument('--asr-backend', default='whispercpp',
+    mine_parser.add_argument('--asr-backend', default='funasr_nano',
                              choices=['whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'],
-                             help='ASR backend for podcast timing (default: whispercpp)')
+                             help='ASR backend for podcast timing (default: funasr_nano)')
     mine_parser.add_argument('--glm-endpoint', default='http://127.0.0.1:8000/v1',
                              help='Optional OpenAI-compatible /audio/transcriptions endpoint (set GLM_ASR_PREFER_ENDPOINT=1)')
 

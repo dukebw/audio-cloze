@@ -24,3 +24,10 @@ models/
 benchmark_sample.*
 benchmark_results.json
 benchmark_backends.json
+
+# Eval audio cache (large binaries)
+eval_samples/audio/
+eval_samples/**/*.mp3
+eval_samples/**/*.wav
+eval_samples/**/*.m4a
+eval_samples/**/*.flac

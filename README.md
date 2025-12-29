@@ -104,6 +104,9 @@ python audio_vocab_miner.py mine 面交 --db vocab.db -o audio_clips
 # Mine multiple words
 python audio_vocab_miner.py mine 保鮮膜 托運 剪刀 --db vocab.db -o audio_clips
 
+# Default ASR backend is Fun-ASR-Nano. Override if needed:
+python audio_vocab_miner.py mine 護城河 --db vocab.db --asr-backend whispercpp
+
 # Mine with alternative ASR backend
 python audio_vocab_miner.py mine 護城河 --db vocab.db --asr-backend funasr_nano
 
@@ -128,7 +131,9 @@ python eval_asr_accuracy.py --fresh --num-youtube 10 --num-podcast 6 \
 ```
 
 Results are written to `eval_samples/eval_results.json` and
-`eval_samples/eval_compare.html`.
+`eval_samples/eval_compare.html`. Audio clips are cached under
+`eval_samples/audio` (gitignored). Use `--audio-dir` to change the cache
+location.
 
 ## Output
 
