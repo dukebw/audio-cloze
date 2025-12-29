@@ -14,13 +14,13 @@ You give it a Chinese word. It finds that word spoken in real content, extracts 
 │   sources.txt              vocab.db (SQLite)              audio_clips/      │
 │   ┌──────────┐            ┌─────────────────┐            ┌──────────────┐   │
 │   │ YouTube  │──index───▶ │ captions (FTS5) │──mine────▶ │ word_clip.mp3│   │
-│   │ Podcasts │            │ episodes (FTS5) │            │ word_cloze.mp3│  │
+│   │ Podcasts │            │ podcast_captions│            │ word_cloze.mp3│  │
 │   └──────────┘            └─────────────────┘            │ review.html  │   │
 │                                   │                      └──────────────┘   │
 │                                   │                             │           │
 │                           ┌───────▼───────┐                     │           │
-│                           │  whisper.cpp  │◀── ASR for podcast  │           │
-│                           │  (CoreML/M4)  │    timing only      │           │
+│                           │  Fun-ASR-Nano │◀── ASR for podcast  │           │
+│                           │  (default)    │    indexing + timing│           │
 │                           └───────────────┘                     │           │
 │                                                                 │           │
 │                                                          ┌──────▼──────┐    │
@@ -31,19 +31,21 @@ You give it a Chinese word. It finds that word spoken in real content, extracts 
 
 ## The trick
 
-YouTube videos have subtitles with timestamps. Podcasts have show notes but no timing. So:
+YouTube videos have subtitles with timestamps. Podcasts have no captions, so we build
+an ASR transcript index. So:
 
 1. **YouTube**: Search subtitles → instant timing → extract clip
-2. **Podcasts**: Search show notes → if hit, run ASR on that episode → get timing → extract clip
+2. **Podcasts**: Run ASR to build transcript index → search transcripts → align timing → extract clip
 
-ASR is expensive, so we only run it when we know the word is there.
+ASR is expensive, so we index once and reuse it. We only run extra ASR for
+timing after a word is found in the transcript index.
 
 ## Current index
 
 | Source | Count | Notes |
 |--------|-------|-------|
 | YouTube videos | 219 | 4 channels, full subtitle search |
-| Podcast episodes | 587 | 12 feeds, show notes indexed |
+| Podcast episodes | 587 | 12 feeds, full ASR transcript index |
 
 ## Setup
 
@@ -51,7 +53,8 @@ ASR is expensive, so we only run it when we know the word is there.
 # Clone and install
 pip install pydub opencc-python-reimplemented webvtt-py feedparser requests yt-dlp
 
-# For podcast ASR (optional, only needed for podcast word timing)
+# For podcast ASR (required for indexing). Default backend is Fun-ASR-Nano.
+# If you want whisper.cpp instead:
 brew install whisper-cpp
 # Download large-v3 model (~3GB)
 curl -L -o models/ggml-large-v3.bin \
@@ -92,8 +95,16 @@ Use `GLM_ASR_PREFER_ENDPOINT=1` with `--glm-endpoint` to target an OpenAI-compat
 ## Usage
 
 ```bash
-# Index sources (YouTube + podcasts)
+# Index sources (YouTube + podcasts). Podcasts are fully transcribed.
 python audio_vocab_miner.py index --sources sources.txt --db vocab.db
+
+# Use whisper.cpp for podcast indexing if desired
+python audio_vocab_miner.py index --sources sources.txt --db vocab.db \
+  --podcast-asr-backend whispercpp
+
+# Reindex specific podcast episodes by title
+python audio_vocab_miner.py index --sources sources.txt --db vocab.db \
+  --type podcast --podcast-title "EP499" --podcast-reindex
 
 # Check what's indexed
 python audio_vocab_miner.py stats --db vocab.db
@@ -150,10 +161,10 @@ audio_clips/
 
 | Backend | Speed | Word Timestamps | Notes |
 |---------|-------|-----------------|-------|
-| whisper.cpp + CoreML | 12-20x RT | Native | Default, best accuracy |
-| mlx-whisper | 12-15x RT | Native | Alternative Whisper |
-| Fun-ASR-Nano | ~10x RT | Forced alignment | 800M params, Chinese dialects |
+| Fun-ASR-Nano | ~10x RT | Forced alignment | Default |
 | GLM-ASR | ~10x RT | Forced alignment | 1.5B params, transformers |
+| whisper.cpp + CoreML | 12-20x RT | Native | Best timestamps, heavier setup |
+| mlx-whisper | 12-15x RT | Native | Alternative Whisper |
 
 - **Native timestamps**: Word timing from ASR output
 - **Forced alignment**: Uses torchaudio MMS_FA for character-level timing

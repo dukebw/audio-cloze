@@ -8,12 +8,12 @@ What's done, what's next.
 - [x] YouTube channel crawling with yt-dlp
 - [x] Subtitle download and FTS5 indexing
 - [x] RSS podcast feed parsing
-- [x] Episode show notes indexing
+- [x] Full podcast ASR transcript indexing
 - [x] Unified search across both sources
 - [x] `sources.txt` config format
 
 ### ASR for podcasts
-- [x] Two-phase search (text first, ASR only on hits)
+- [x] Full transcript index (chunked ASR over episodes)
 - [x] whisper.cpp integration (replaces slower faster-whisper)
 - [x] CoreML support for Apple Neural Engine
 - [x] mlx-whisper benchmarked as alternative (similar speed)
@@ -118,9 +118,9 @@ Current numbers on M4 Max:
 | Task | Time |
 |------|------|
 | Index 50 YouTube videos | ~10 min |
-| Index 50 podcast episodes | ~2 min (show notes only) |
+| Index 50 podcast episodes | depends on ASR backend (full transcription) |
 | Mine 1 word (YouTube hit) | instant |
-| Mine 1 word (podcast, needs ASR) | ~20 sec per 5-min chunk |
+| Mine 1 word (podcast, needs alignment) | ~20 sec per 5-min chunk |
 
 ASR backends (5-min audio):
 
