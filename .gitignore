@@ -16,3 +16,11 @@ venv/
 # Temp files
 *.part
 *.vtt
+
+# Large model files
+models/
+
+# Benchmark data (large audio samples)
+benchmark_sample.*
+benchmark_results.json
+benchmark_backends.json

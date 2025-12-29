@@ -629,22 +629,25 @@ def index_wenetspeech_corpus(conn: sqlite3.Connection, manifest_path: Path,
 # ASR Localizer (Whisper large-v3 for Podcast Timing)
 # =============================================================================
 
-# Lazy load whisper to avoid import overhead when not needed
-_whisper_model = None
+# whisper.cpp model path (ggml format, using Metal acceleration on Apple Silicon)
+WHISPER_MODEL_PATH = Path(__file__).parent / "models" / "ggml-large-v3.bin"
 
-def get_whisper_model():
-    """Get or load the Whisper large-v3 model (lazy loading)."""
-    global _whisper_model
-    if _whisper_model is None:
-        try:
-            import whisper
-            log.info("Loading Whisper large-v3 model (this may take a moment)...")
-            _whisper_model = whisper.load_model("large-v3")
-            log.info("Whisper model loaded successfully")
-        except ImportError:
-            log.error("Whisper not installed. Run: pip install openai-whisper")
-            return None
-    return _whisper_model
+# Optimal settings for M4 Max with Metal GPU (from benchmark)
+WHISPER_CPP_THREADS = 8
+WHISPER_CPP_PROCESSORS = 4
+
+
+def check_whisper_cpp():
+    """Check if whisper.cpp (whisper-cli) is available."""
+    result = subprocess.run(["which", "whisper-cli"], capture_output=True, text=True)
+    if result.returncode != 0:
+        log.error("whisper-cli not found. Install with: brew install whisper-cpp")
+        return False
+    if not WHISPER_MODEL_PATH.exists():
+        log.error(f"Whisper model not found at {WHISPER_MODEL_PATH}")
+        log.error("Download from: https://huggingface.co/ggerganov/whisper.cpp/tree/main")
+        return False
+    return True
 
 
 def download_podcast_audio(audio_url: str, output_path: Path,
@@ -684,7 +687,9 @@ def download_podcast_audio(audio_url: str, output_path: Path,
 
 
 def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
-    """Use Whisper large-v3 to find precise word timing in audio.
+    """Use whisper.cpp (large-v3) to find precise word timing in audio.
+
+    Uses Metal GPU acceleration on Apple Silicon for ~16x real-time speed.
 
     Returns list of occurrences with:
     - start: start time in seconds
@@ -692,31 +697,93 @@ def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
     - text: surrounding segment text
     - confidence: word probability
     """
-    model = get_whisper_model()
-    if model is None:
+    if not check_whisper_cpp():
         return []
 
     log.info(f"  Running Whisper ASR on {audio_path.name}...")
 
+    # Convert to 16kHz WAV (whisper.cpp requirement)
+    wav_path = audio_path.with_suffix('.wav')
+    convert_cmd = [
+        "ffmpeg", "-y", "-i", str(audio_path),
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+        str(wav_path)
+    ]
+    convert_result = subprocess.run(convert_cmd, capture_output=True, text=True)
+    if convert_result.returncode != 0:
+        log.error(f"Failed to convert audio to WAV: {convert_result.stderr}")
+        return []
+
+    # Get audio duration for logging
+    probe = subprocess.run([
+        "ffprobe", "-v", "quiet",
+        "-show_entries", "format=duration",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(wav_path)
+    ], capture_output=True, text=True)
+    duration = float(probe.stdout.strip()) if probe.stdout.strip() else 0
+    log.info(f"Processing audio with duration {duration//60:02.0f}:{duration%60:06.3f}")
+
+    # Run whisper.cpp with JSON output
+    output_base = audio_path.parent / f"whisper_{audio_path.stem}"
+    cmd = [
+        "whisper-cli",
+        "-m", str(WHISPER_MODEL_PATH),
+        "-l", "zh",
+        "-t", str(WHISPER_CPP_THREADS),
+        "-p", str(WHISPER_CPP_PROCESSORS),
+        "-ojf",  # JSON full output with word timestamps
+        "-of", str(output_base),
+        str(wav_path)
+    ]
+
     try:
-        result = model.transcribe(
-            str(audio_path),
-            language="zh",
-            word_timestamps=True,
-        )
+        proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600)
+    except subprocess.TimeoutExpired:
+        log.error("Whisper transcription timed out after 10 minutes")
+        wav_path.unlink(missing_ok=True)
+        return []
+
+    # Parse JSON output
+    json_file = Path(str(output_base) + ".json")
+    if not json_file.exists():
+        log.error(f"Whisper failed to generate output: {proc.stderr[:500]}")
+        wav_path.unlink(missing_ok=True)
+        return []
+
+    try:
+        with open(json_file, 'rb') as f:
+            raw = f.read()
+        text = raw.decode('utf-8', errors='replace')
+        data = json.loads(text)
     except Exception as e:
-        log.error(f"Whisper transcription failed: {e}")
+        log.error(f"Failed to parse whisper output: {e}")
+        wav_path.unlink(missing_ok=True)
+        json_file.unlink(missing_ok=True)
         return []
 
     # Get word variants (simplified/traditional)
     variants = get_word_variants(word)
     occurrences = []
 
-    for segment in result.get('segments', []):
-        words = segment.get('words', [])
+    # Extract word-level timestamps from whisper.cpp JSON
+    for segment in data.get("transcription", []):
+        segment_text = segment.get("text", "")
+        tokens = segment.get("tokens", [])
+
+        # Build list of words with timing
+        words = []
+        for token in tokens:
+            if "text" in token and "offsets" in token:
+                words.append({
+                    "word": token["text"].strip(),
+                    "start": token["offsets"]["from"] / 1000.0,
+                    "end": token["offsets"]["to"] / 1000.0,
+                    "probability": token.get("p", 0.5),
+                })
 
         for i, word_info in enumerate(words):
-            word_text = word_info.get('word', '').strip()
+            word_text = word_info["word"]
 
             # Check if any variant appears in this word or surrounding context
             found_variant = None
@@ -725,19 +792,25 @@ def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
                     found_variant = variant
                     break
                 # Check surrounding words for multi-character matches
-                context = ''.join(w.get('word', '') for w in words[max(0, i-2):i+3])
+                context = ''.join(w["word"] for w in words[max(0, i-2):i+3])
                 if variant in context:
                     found_variant = variant
                     break
 
             if found_variant:
                 occurrences.append({
-                    'start': word_info.get('start', 0),
-                    'end': word_info.get('end', 0),
-                    'text': segment.get('text', ''),
-                    'confidence': word_info.get('probability', 0.5),
+                    'start': word_info["start"],
+                    'end': word_info["end"],
+                    'text': segment_text,
+                    'confidence': word_info["probability"],
                     'found_variant': found_variant,
                 })
+
+    # Clean up temp files
+    wav_path.unlink(missing_ok=True)
+    json_file.unlink(missing_ok=True)
+    for f in output_base.parent.glob(f"{output_base.name}*"):
+        f.unlink(missing_ok=True)
 
     log.info(f"  ASR found {len(occurrences)} occurrences of '{word}'")
     return occurrences
