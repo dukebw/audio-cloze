@@ -214,7 +214,7 @@
     <div class="stats">
         <div class="stat-card">
             <h3>Total Samples</h3>
-            <div class="value">30</div>
+            <div class="value">31</div>
         </div>
         <div class="stat-card">
             <h3>YouTube</h3>
@@ -222,7 +222,7 @@
         </div>
         <div class="stat-card">
             <h3>Podcast</h3>
-            <div class="value">12</div>
+            <div class="value">13</div>
         </div>
     </div>
 
@@ -233,27 +233,27 @@
 
             <div class="benchmark-card whisper">
                 <h4>Whisper-Large-V3</h4>
-                <div class="speed-value">12.5x</div>
+                <div class="speed-value">12.6x</div>
                 <div class="speed-label">realtime speed</div>
                 <div class="benchmark-details">
-                    Avg: 3.8s per 45s audio<br>
-                    30 samples, 0 errors
+                    Avg: 3.7s per 45s audio<br>
+                    31 samples, 0 errors
                 </div>
                 <div class="speed-bar-container">
-                    <div class="speed-bar" style="width: 88%"></div>
+                    <div class="speed-bar" style="width: 89%"></div>
                 </div>
             </div>
 
             <div class="benchmark-card funasr">
                 <h4>Fun-ASR-Nano</h4>
-                <div class="speed-value">12.2x</div>
+                <div class="speed-value">12.0x</div>
                 <div class="speed-label">realtime speed</div>
                 <div class="benchmark-details">
-                    Avg: 4.1s per 45s audio<br>
-                    30 samples, 0 errors
+                    Avg: 4.3s per 45s audio<br>
+                    31 samples, 0 errors
                 </div>
                 <div class="speed-bar-container">
-                    <div class="speed-bar" style="width: 86%"></div>
+                    <div class="speed-bar" style="width: 85%"></div>
                 </div>
             </div>
 
@@ -263,7 +263,7 @@
                 <div class="speed-label">realtime speed</div>
                 <div class="benchmark-details">
                     Avg: 4.2s per 45s audio<br>
-                    30 samples, 0 errors
+                    30 samples, 1 errors
                 </div>
                 <div class="speed-bar-container">
                     <div class="speed-bar" style="width: 100%"></div>
@@ -1992,6 +1992,63 @@
             </div>
         </div>
 
+        <div class="sample" data-type="podcast" id="sample-30">
+            <div class="sample-header">
+                <div>
+                    <h3>EP499 TAXI DRIVER (explicit @ 610s)</h3>
+                    <div class="sample-meta">台灣通勤第一品牌 • 610s - 655s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="audio/pod_631ec155_610.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.0s (15.0x RT) • 189 chars</span>
+                    </div>
+                    <div class="transcription-text">我可以跟他說那可能是個兩顆拉的鑽石然後可能對媽媽求婚很急然後忘在台北的豪宅你喜歡這答案嗎你問真好耶對 你喜歡這個答案嗎這答案真無聊凌晨三點收到女朋友睡著不睡恭喜你 請你嫁給我吧然後有些朋友說欸你的價值人你戒指人我輸我輸我輸我輸我輸你覺得呢你怎麼會這麼好笑可是當下司機笑不出來啊我也不覺得好笑我只覺得你覺得我就問你覺得嘛快點在一個路口我就要下車了你趕快跟我講啊所以在趁他彎道那轉角</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(30, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(30, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(30, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">10.6s (4.2x RT) • 222 chars</span>
+                    </div>
+                    <div class="transcription-text">扣了扣了扣了，我也跟他说那可能是个两克拉的钻石，然后可能对方要求婚很急，然后忘在台北的豪宅。对啊，你喜欢这答案吗？对啊，你喜欢这答案吗？看凌晨3点无聊，凌晨3点时候到，女朋友睡着不睡。哎，恭喜你，请你嫁给我吧。哪位小朋友说，哎，你的驾驶的戒指我出我出我出我出我出，你觉得呢？你怎么会这么好笑？可当下司机笑不出来啊，我也不觉得好笑，我只是觉得你你觉得。哈哈哈，我就问你觉得嘛，快点，在一个路口我就要下车了，你赶快跟我讲啊，所以在趁他弯道那个转角。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(30, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(30, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(30, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">1.1s (N/A) • 0 chars</span>
+                    </div>
+                    <div class="transcription-text"><span class="error">Error: &#x27;cpu&#x27;</span></div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(30, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(30, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(30, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
     </div>
 
     <h2 class="section-title">Your Ratings Summary</h2>
@@ -2017,7 +2074,7 @@
         const ratings = {};
         const backends = ["whisper-large-v3", "funasr-nano", "glm-asr"];
         const backendLabels = {"whisper-large-v3": "Whisper-Large-V3", "funasr-nano": "Fun-ASR-Nano", "glm-asr": "GLM-ASR"};
-        const benchmarkStats = {"whisper-large-v3": {"avg_time": 3.774550112088521, "avg_speed": 12.484254066688841, "avg_chars": 247.13333333333333, "errors": 0, "count": 30}, "funasr-nano": {"avg_time": 4.069536304473877, "avg_speed": 12.235404635357163, "avg_chars": 290.9, "errors": 0, "count": 30}, "glm-asr": {"avg_time": 4.185802268981933, "avg_speed": 14.148431700791003, "avg_chars": 284.53333333333336, "errors": 0, "count": 30}};
+        const benchmarkStats = {"whisper-large-v3": {"avg_time": 3.749256134033203, "avg_speed": 12.56695454681101, "avg_chars": 245.25806451612902, "errors": 0, "count": 31}, "funasr-nano": {"avg_time": 4.2800914164512385, "avg_speed": 11.977700844908382, "avg_chars": 288.6774193548387, "errors": 0, "count": 31}, "glm-asr": {"avg_time": 4.185802268981933, "avg_speed": 14.148431700791003, "avg_chars": 284.53333333333336, "errors": 1, "count": 30}};
 
         function filterSamples(type) {
             document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));

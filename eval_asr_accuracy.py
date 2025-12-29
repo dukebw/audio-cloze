@@ -32,6 +32,7 @@ FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 EVAL_DIR = Path(__file__).parent / "eval_samples"
 DEFAULT_AUDIO_SUBDIR = "audio"
+EP499_SAMPLE_START = 610  # contains "留下兩個懸念" in EP499 TAXI DRIVER
 RESULTS_FILE = EVAL_DIR / "eval_results.json"
 HTML_FILE = EVAL_DIR / "eval_compare.html"
 
@@ -140,6 +141,70 @@ def ensure_sample_audio(sample: Sample, audio_path: Path,
         )
 
     return False
+
+
+def add_explicit_ep499_sample(results: list[EvalResult],
+                              conn: sqlite3.Connection,
+                              audio_dir: Path,
+                              backend_specs: list[BackendSpec]) -> None:
+    """Ensure EP499 sample is included for side-by-side comparison."""
+    row = conn.execute(
+        """
+        SELECT episode_id, title, channel_name, audio_url, duration
+        FROM episodes
+        WHERE title LIKE '%EP499%'
+        ORDER BY pub_date DESC
+        LIMIT 1
+        """
+    ).fetchone()
+    if not row:
+        print("WARNING: EP499 episode not found in database.")
+        return
+
+    episode_id, title, channel, audio_url, duration = row
+    if not audio_url:
+        print("WARNING: EP499 audio URL missing; cannot add sample.")
+        return
+
+    start_time = float(EP499_SAMPLE_START)
+    sample_id = f"pod_{episode_id[:8]}_{int(start_time)}"
+    audio_path = audio_dir / f"{sample_id}.mp3"
+    label = f"{title} (explicit @ {int(start_time)}s)"
+    sample = Sample(
+        sample_id=sample_id,
+        source_type="podcast",
+        source_id=episode_id,
+        title=label,
+        channel=channel,
+        audio_path=relative_audio_path(audio_path),
+        start_time=start_time,
+        duration=SAMPLE_DURATION
+    )
+
+    existing = next((r for r in results if r.sample.sample_id == sample_id), None)
+    if not ensure_sample_audio(sample, audio_path, conn):
+        print(f"  Missing audio: {audio_path.name} (skipping EP499 sample)")
+        return
+
+    try:
+        rel_path = audio_path.relative_to(EVAL_DIR)
+        if sample.audio_path != str(rel_path):
+            sample.audio_path = str(rel_path)
+    except ValueError:
+        pass
+
+    transcriptions = run_transcriptions(
+        audio_path,
+        backend_specs,
+        existing=existing.transcriptions if existing else None,
+        audio_duration=sample.duration
+    )
+
+    if existing:
+        existing.sample = sample
+        existing.transcriptions = transcriptions
+    else:
+        results.append(EvalResult(sample=sample, transcriptions=transcriptions))
 
 
 def get_random_youtube_samples(conn: sqlite3.Connection, n: int) -> list[dict]:
@@ -942,6 +1007,8 @@ def main():
                         help="Audio cache directory (relative to eval_samples unless absolute)")
     parser.add_argument("--backends", default=",".join(spec.key for spec in BACKEND_SPECS),
                         help="Comma-separated backend keys to run")
+    parser.add_argument("--include-ep499", action="store_true",
+                        help="Include explicit EP499 TAXI DRIVER sample for comparison")
     args = parser.parse_args()
 
     backend_keys = [b.strip() for b in args.backends.split(",") if b.strip()]
@@ -970,6 +1037,8 @@ def main():
         conn = sqlite3.connect(str(db_path)) if db_path.exists() else None
         if conn is None:
             print("WARNING: Database not found; podcast audio cannot be re-downloaded.")
+        if conn is not None and args.include_ep499:
+            add_explicit_ep499_sample(results, conn, audio_dir, backend_specs)
         for i, result in enumerate(results):
             sample = result.sample
             audio_path = resolve_audio_path(sample.audio_path, audio_dir)
@@ -1083,6 +1152,9 @@ def main():
                 sample=sample,
                 transcriptions=transcriptions
             ))
+
+        if args.include_ep499:
+            add_explicit_ep499_sample(results, conn, audio_dir, backend_specs)
 
         conn.close()
 
