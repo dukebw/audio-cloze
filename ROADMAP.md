@@ -15,7 +15,8 @@ What's done, what's next.
 ### ASR for podcasts
 - [x] Two-phase search (text first, ASR only on hits)
 - [x] whisper.cpp integration (replaces slower faster-whisper)
-- [x] CoreML support for Apple Neural Engine (~20x real-time)
+- [x] CoreML support for Apple Neural Engine
+- [x] mlx-whisper benchmarked as alternative (similar speed)
 - [x] Smart chunking for long episodes (5-min chunks, early exit)
 - [x] Simplified/Traditional Chinese variant matching
 
@@ -73,7 +74,7 @@ When a word isn't in the index:
 
 ---
 
-## Benchmarks to revisit
+## Benchmarks
 
 Current numbers on M4 Max:
 
@@ -82,7 +83,11 @@ Current numbers on M4 Max:
 | Index 50 YouTube videos | ~10 min |
 | Index 50 podcast episodes | ~2 min (show notes only) |
 | Mine 1 word (YouTube hit) | instant |
-| Mine 1 word (podcast, needs ASR) | ~15 sec per 5-min chunk |
-| Full ASR on 681 hours of podcasts | ~34 hours |
+| Mine 1 word (podcast, needs ASR) | ~20 sec per 5-min chunk |
 
-If CoreML gets faster or we find a better model, update these.
+ASR backends (5-min audio, large-v3):
+
+| Backend | Speed |
+|---------|-------|
+| mlx-whisper | 12-15x realtime |
+| whisper.cpp + CoreML | 12-20x realtime |

@@ -101,11 +101,10 @@ audio_clips/
 
 | Backend | Speed | 5 min audio |
 |---------|-------|-------------|
-| whisper.cpp + CoreML | 20x real-time | 15 sec |
-| whisper.cpp + Metal | 13x real-time | 23 sec |
-| faster-whisper (CPU) | 1.2x real-time | 250 sec |
+| mlx-whisper | 12-15x real-time | 20-25 sec |
+| whisper.cpp + CoreML | 12-20x real-time | 15-25 sec |
 
-CoreML uses Apple Neural Engine. It's fast.
+Both use Apple Silicon acceleration. Performance varies with thermal state.
 
 ## Adding sources
 
