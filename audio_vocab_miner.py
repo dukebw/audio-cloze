@@ -105,14 +105,6 @@ CREATE TABLE IF NOT EXISTS episodes (
     indexed_at TEXT
 );
 
--- Legacy: Episode show notes FTS (deprecated)
-CREATE VIRTUAL TABLE IF NOT EXISTS episode_notes USING fts5(
-    episode_id,
-    channel,
-    text,
-    tokenize='unicode61 remove_diacritics 2'
-);
-
 -- WenetSpeech pre-transcribed segments
 CREATE TABLE IF NOT EXISTS wenetspeech_segments (
     segment_id TEXT PRIMARY KEY,
@@ -193,6 +185,16 @@ def init_database(db_path: Path) -> sqlite3.Connection:
         if 'backend' not in columns:
             conn.execute("ALTER TABLE podcast_captions ADD COLUMN backend TEXT")
             log.info("Applied migration: added backend to podcast_captions")
+    except sqlite3.OperationalError:
+        pass
+
+    try:
+        row = conn.execute(
+            "SELECT name FROM sqlite_master WHERE type='table' AND name='episode_notes'"
+        ).fetchone()
+        if row:
+            conn.execute("DROP TABLE IF EXISTS episode_notes")
+            log.info("Dropped legacy episode_notes table")
     except sqlite3.OperationalError:
         pass
 
@@ -1809,9 +1811,8 @@ def find_word_in_index(conn: sqlite3.Connection, word: str, limit: int = 10,
         'subtitle': 0,        # YouTube subtitles
         'asr_verified': 1,    # WenetSpeech pre-transcribed
         'asr_chunk': 2,       # Podcast transcript chunk (needs alignment)
-        'text_only': 3,       # Legacy show notes only
     }
-    results.sort(key=lambda x: confidence_order.get(x.get('timing_confidence', 'text_only'), 99))
+    results.sort(key=lambda x: confidence_order.get(x.get('timing_confidence', 'unknown'), 99))
 
     return results[:limit]
 
@@ -1879,7 +1880,7 @@ class AudioClip:
     source_url: str
     # Multi-source fields
     source_type: str = 'youtube'  # 'youtube', 'podcast', 'wenetspeech'
-    timing_confidence: str = 'subtitle'  # 'subtitle', 'asr_verified', 'text_only'
+    timing_confidence: str = 'subtitle'  # 'subtitle', 'asr_verified', 'asr_chunk'
 
 
 def create_clip_from_hit(word: str, hit: dict, output_dir: Path,
