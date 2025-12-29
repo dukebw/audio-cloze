@@ -19,6 +19,11 @@ What's done, what's next.
 - [x] mlx-whisper benchmarked as alternative (similar speed)
 - [x] Smart chunking for long episodes (5-min chunks, early exit)
 - [x] Simplified/Traditional Chinese variant matching
+- [x] Pluggable ASR backend system (`--asr-backend` CLI arg)
+- [x] Fun-ASR-Nano backend
+- [x] GLM-ASR backend
+- [x] Forced alignment with torchaudio MMS_FA (for backends without native timestamps)
+- [x] Transcript caching in SQLite
 
 ### Clip generation
 - [x] Audio extraction with ffmpeg
@@ -74,6 +79,38 @@ When a word isn't in the index:
 
 ---
 
+## Known Issues
+
+### Fun-ASR-Nano (resolved Dec 2025)
+
+Fun-ASR-Nano now loads correctly via `funasr.AutoModel` using
+`trust_remote_code=True` and `remote_code="./model.py"` as specified in the
+model card. The backend keeps the forced-alignment fallback for timestamps.
+
+---
+
+### GLM-ASR (resolved Dec 2025)
+
+GLM-ASR now runs locally via transformers 5.x using `AutoProcessor` +
+`AutoModelForSeq2SeqLM`, removing the dependency on an external SGLang server.
+Endpoint mode remains available for OpenAI-compatible deployments.
+
+---
+
+### Evaluation Results (Dec 29, 2025)
+
+Ran ASR accuracy benchmarks on 30 samples (18 YouTube + 12 podcast):
+
+| Backend | Status | Avg Time | Avg Chars |
+|---------|--------|----------|-----------|
+| Whisper-Large-V3 | Working | 3.8s | 247 |
+| Fun-ASR-Nano | Working | 4.1s | 291 |
+| GLM-ASR | Working | 4.2s | 285 |
+
+Results saved to `eval_samples/eval_compare.html` for visual comparison.
+
+---
+
 ## Benchmarks
 
 Current numbers on M4 Max:
@@ -85,9 +122,11 @@ Current numbers on M4 Max:
 | Mine 1 word (YouTube hit) | instant |
 | Mine 1 word (podcast, needs ASR) | ~20 sec per 5-min chunk |
 
-ASR backends (5-min audio, large-v3):
+ASR backends (5-min audio):
 
-| Backend | Speed |
-|---------|-------|
-| mlx-whisper | 12-15x realtime |
-| whisper.cpp + CoreML | 12-20x realtime |
+| Backend | Speed | Word Timestamps | Status |
+|---------|-------|-----------------|--------|
+| whisper.cpp + CoreML | 12-20x RT | Native | Working |
+| mlx-whisper | 12-15x RT | Native | Working |
+| Fun-ASR-Nano | — | Forced alignment | Working |
+| GLM-ASR | — | Forced alignment | Working |

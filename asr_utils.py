@@ -1,0 +1,112 @@
+#!/usr/bin/env python3
+"""Shared helpers for ASR backends."""
+
+from __future__ import annotations
+
+import os
+import sys
+from pathlib import Path
+from typing import Optional, Tuple
+
+
+def select_asr_device(env_var: str, default: str = "cpu") -> str:
+    """Pick a device for ASR models, allowing env override."""
+    override = os.environ.get(env_var)
+    if override:
+        return override
+    try:
+        import torch
+        if torch.cuda.is_available():
+            return "cuda:0"
+        if hasattr(torch.backends, "mps") and torch.backends.mps.is_available():
+            return "mps"
+    except Exception:
+        pass
+    return default
+
+
+def resolve_torch_dtype(value: Optional[str]):
+    if not value or value == "auto":
+        return "auto"
+    try:
+        import torch
+        return getattr(torch, value)
+    except Exception:
+        return "auto"
+
+
+def ensure_lzma() -> bool:
+    try:
+        import lzma  # noqa: F401
+        return True
+    except Exception:
+        try:
+            from backports import lzma as backports_lzma
+            sys.modules["lzma"] = backports_lzma
+            return True
+        except Exception:
+            return False
+
+
+def ensure_qwen3_weights() -> Optional[Path]:
+    """Ensure Qwen3-0.6B weights are available for Fun-ASR-Nano."""
+    target_dir = (
+        Path.home()
+        / ".cache/modelscope/hub/models/FunAudioLLM/Fun-ASR-Nano-2512/Qwen3-0.6B"
+    )
+    weights_path = target_dir / "model.safetensors"
+    if weights_path.exists():
+        return weights_path
+    try:
+        from huggingface_hub import hf_hub_download
+    except ImportError:
+        return None
+    target_dir.mkdir(parents=True, exist_ok=True)
+    return Path(
+        hf_hub_download("Qwen/Qwen3-0.6B", "model.safetensors", local_dir=str(target_dir))
+    )
+
+
+def patch_funasr_load_in_8bit() -> bool:
+    try:
+        import transformers
+    except Exception:
+        return False
+    if getattr(transformers, "_funasr_load_in_8bit_patched", False):
+        return True
+    original = transformers.AutoModelForCausalLM.from_pretrained
+
+    def _patched(*args, **kwargs):
+        kwargs.pop("load_in_8bit", None)
+        return original(*args, **kwargs)
+
+    transformers.AutoModelForCausalLM.from_pretrained = _patched
+    transformers._funasr_load_in_8bit_patched = True
+    return True
+
+
+def load_glm_asr_transformers(
+    model_id: str,
+    device_env: str = "GLM_ASR_DEVICE",
+    dtype_env: str = "GLM_ASR_DTYPE",
+) -> Tuple[object, object]:
+    ensure_lzma()
+    from transformers import AutoModelForSeq2SeqLM, AutoProcessor
+
+    dtype = resolve_torch_dtype(os.environ.get(dtype_env, "auto"))
+    device_override = os.environ.get(device_env)
+    processor = AutoProcessor.from_pretrained(model_id, trust_remote_code=True)
+    if device_override:
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map=None
+        )
+        model.to(device_override)
+    else:
+        model = AutoModelForSeq2SeqLM.from_pretrained(
+            model_id,
+            torch_dtype=dtype,
+            device_map="auto"
+        )
+    return model, processor

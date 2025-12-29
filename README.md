@@ -65,6 +65,30 @@ curl -L -o models/ggml-large-v3-encoder.mlmodelc.zip \
 unzip models/ggml-large-v3-encoder.mlmodelc.zip -d models/
 ```
 
+### Alternative ASR Backends
+
+**Fun-ASR-Nano** (800M params, Chinese + dialects):
+```bash
+pip install funasr
+```
+First run downloads the Fun-ASR-Nano weights plus the Qwen3-0.6B LLM weights.
+
+**GLM-ASR** (local transformers, 1.5B params):
+```bash
+pip install git+https://github.com/huggingface/transformers.git
+pip install accelerate
+```
+If your Python build is missing `_lzma` (common with pyenv), install xz headers
+and then:
+```bash
+brew install xz
+CFLAGS="-I/opt/homebrew/opt/xz/include" LDFLAGS="-L/opt/homebrew/opt/xz/lib" \
+  pip install backports.lzma
+```
+Set device/dtype via env vars, e.g. `GLM_ASR_DEVICE=mps` or `GLM_ASR_DTYPE=float16`.
+Use `GLM_ASR_PREFER_ENDPOINT=1` with `--glm-endpoint` to target an OpenAI-compatible
+`/audio/transcriptions` server.
+
 ## Usage
 
 ```bash
@@ -80,11 +104,31 @@ python audio_vocab_miner.py mine 面交 --db vocab.db -o audio_clips
 # Mine multiple words
 python audio_vocab_miner.py mine 保鮮膜 托運 剪刀 --db vocab.db -o audio_clips
 
+# Mine with alternative ASR backend
+python audio_vocab_miner.py mine 護城河 --db vocab.db --asr-backend funasr_nano
+
+# Mine with GLM-ASR (local)
+python audio_vocab_miner.py mine 護城河 --db vocab.db --asr-backend glm_asr
+
 # Regenerate review page
 python audio_vocab_miner.py review -o audio_clips
 ```
 
 Open `audio_clips/review.html` to listen, approve/reject, then export to Anki.
+
+## Evaluation
+
+```bash
+# Run evals over existing samples (adds missing backends)
+GLM_ASR_DEVICE=mps python eval_asr_accuracy.py
+
+# Fresh sample set
+python eval_asr_accuracy.py --fresh --num-youtube 10 --num-podcast 6 \
+  --backends whisper-large-v3,funasr-nano,glm-asr
+```
+
+Results are written to `eval_samples/eval_results.json` and
+`eval_samples/eval_compare.html`.
 
 ## Output
 
@@ -97,14 +141,19 @@ audio_clips/
 └── review.html                  # Web UI for reviewing
 ```
 
-## ASR Performance (M4 Max)
+## ASR Backends
 
-| Backend | Speed | 5 min audio |
-|---------|-------|-------------|
-| mlx-whisper | 12-15x real-time | 20-25 sec |
-| whisper.cpp + CoreML | 12-20x real-time | 15-25 sec |
+| Backend | Speed | Word Timestamps | Notes |
+|---------|-------|-----------------|-------|
+| whisper.cpp + CoreML | 12-20x RT | Native | Default, best accuracy |
+| mlx-whisper | 12-15x RT | Native | Alternative Whisper |
+| Fun-ASR-Nano | ~10x RT | Forced alignment | 800M params, Chinese dialects |
+| GLM-ASR | ~10x RT | Forced alignment | 1.5B params, transformers |
 
-Both use Apple Silicon acceleration. Performance varies with thermal state.
+- **Native timestamps**: Word timing from ASR output
+- **Forced alignment**: Uses torchaudio MMS_FA for character-level timing
+
+Performance varies with thermal state on Apple Silicon.
 
 ## Adding sources
 

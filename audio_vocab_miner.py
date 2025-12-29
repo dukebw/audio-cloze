@@ -47,6 +47,12 @@ import feedparser
 import hashlib
 import html
 import requests
+from asr_utils import (
+    ensure_qwen3_weights,
+    load_glm_asr_transformers,
+    patch_funasr_load_in_8bit,
+    select_asr_device,
+)
 
 
 # =============================================================================
@@ -142,6 +148,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS podcast_captions_fts USING fts5(
     episode_id,
     text,
     tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Transcript cache for ASR results
+CREATE TABLE IF NOT EXISTS transcript_cache (
+    audio_hash TEXT NOT NULL,
+    backend TEXT NOT NULL,
+    transcript TEXT NOT NULL,
+    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY (audio_hash, backend)
 );
 """
 
@@ -817,11 +832,14 @@ def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
 
 
 def smart_asr_localize(audio_url: str, word: str, duration: float,
-                        temp_dir: Path) -> list[dict]:
+                        temp_dir: Path, backend: str = 'whispercpp',
+                        conn: sqlite3.Connection = None) -> list[dict]:
     """Smart ASR: chunk long episodes to avoid full transcription.
 
     For short episodes (<15 min): transcribe full audio
     For long episodes: process in 5-minute chunks, stop when found
+
+    Supports multiple backends: 'whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'
     """
     if duration <= 0:
         duration = 3600  # Assume 1 hour if unknown
@@ -830,7 +848,7 @@ def smart_asr_localize(audio_url: str, word: str, duration: float,
     if duration < 900:  # 15 minutes
         audio_path = temp_dir / "podcast_full.mp3"
         if download_podcast_audio(audio_url, audio_path):
-            return localize_word_with_asr(audio_path, word)
+            return localize_word_with_backend(audio_path, word, backend, conn)
         return []
 
     # Long episodes: chunk-based search
@@ -847,7 +865,7 @@ def smart_asr_localize(audio_url: str, word: str, duration: float,
         if not download_podcast_audio(audio_url, chunk_path, chunk_start, chunk_end):
             continue
 
-        occurrences = localize_word_with_asr(chunk_path, word)
+        occurrences = localize_word_with_backend(chunk_path, word, backend, conn)
 
         # Adjust timing to absolute position
         for occ in occurrences:
@@ -864,6 +882,299 @@ def smart_asr_localize(audio_url: str, word: str, duration: float,
             break
 
     return all_occurrences
+
+
+# =============================================================================
+# Alternative ASR Backends (Fun-ASR-Nano, GLM-ASR)
+# =============================================================================
+
+# Available backends: 'whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'
+DEFAULT_ASR_BACKEND = 'whispercpp'
+FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
+GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
+GLM_ASR_ENDPOINT = "http://127.0.0.1:8000/v1"  # Optional OpenAI-compatible endpoint
+
+_FUNASR_MODEL = None
+_GLM_ASR_MODEL = None
+_GLM_ASR_PROCESSOR = None
+
+
+def get_cached_transcript(audio_path: Path, backend: str, conn: sqlite3.Connection) -> Optional[str]:
+    """Check cache for existing transcript."""
+    audio_hash = hashlib.sha256(audio_path.read_bytes()).hexdigest()
+    row = conn.execute(
+        "SELECT transcript FROM transcript_cache WHERE audio_hash = ? AND backend = ?",
+        (audio_hash, backend)
+    ).fetchone()
+    return row[0] if row else None
+
+
+def cache_transcript(audio_path: Path, backend: str, transcript: str, conn: sqlite3.Connection):
+    """Cache transcript for future reuse."""
+    audio_hash = hashlib.sha256(audio_path.read_bytes()).hexdigest()
+    conn.execute(
+        "INSERT OR REPLACE INTO transcript_cache (audio_hash, backend, transcript) VALUES (?, ?, ?)",
+        (audio_hash, backend, transcript)
+    )
+    conn.commit()
+
+
+def transcribe_with_funasr(audio_path: Path, language: str = "中文") -> str:
+    """Transcribe audio using Fun-ASR-Nano (text only, no timestamps)."""
+    try:
+        from funasr import AutoModel
+        from funasr.models.fun_asr_nano import model as funasr_nano_model  # noqa: F401
+    except ImportError:
+        raise RuntimeError("Fun-ASR-Nano requires: pip install funasr")
+
+    log.info(f"  Running Fun-ASR-Nano on {audio_path.name}...")
+    ensure_qwen3_weights()
+    patch_funasr_load_in_8bit()
+    global _FUNASR_MODEL
+    if _FUNASR_MODEL is None:
+        device = select_asr_device("FUNASR_DEVICE")
+        _FUNASR_MODEL = AutoModel(
+            model=FUNASR_MODEL_ID,
+            device=device,
+            disable_update=True
+        )
+    res = _FUNASR_MODEL.generate(
+        input=[str(audio_path)],
+        cache={},
+        batch_size=1,
+        language=language,
+        itn=True
+    )
+    return res[0]["text"] if res else ""
+
+
+def _load_glm_asr_transformers():
+    global _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
+    if _GLM_ASR_MODEL is None or _GLM_ASR_PROCESSOR is None:
+        _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR = load_glm_asr_transformers(GLM_ASR_MODEL_ID)
+    return _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
+
+
+def _transcribe_with_glm_asr_transformers(audio_path: Path) -> str:
+    model, processor = _load_glm_asr_transformers()
+    log.info(f"  Running GLM-ASR (transformers) on {audio_path.name}...")
+    inputs = processor.apply_transcription_request(str(audio_path))
+    dtype = getattr(model, "dtype", None)
+    if dtype is not None:
+        inputs = inputs.to(model.device, dtype=dtype)
+    else:
+        inputs = inputs.to(model.device)
+    try:
+        import torch
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                do_sample=False,
+                max_new_tokens=int(os.environ.get("GLM_ASR_MAX_NEW_TOKENS", "512"))
+            )
+    except Exception:
+        outputs = model.generate(
+            **inputs,
+            do_sample=False,
+            max_new_tokens=int(os.environ.get("GLM_ASR_MAX_NEW_TOKENS", "512"))
+        )
+    prompt_len = inputs["input_ids"].shape[1]
+    decoded = processor.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
+    return decoded[0].strip() if decoded else ""
+
+
+def _transcribe_with_glm_asr_endpoint(audio_path: Path, endpoint: str) -> str:
+    try:
+        from openai import OpenAI
+    except ImportError:
+        raise RuntimeError("GLM-ASR endpoint mode requires: pip install openai")
+
+    log.info(f"  Running GLM-ASR (endpoint) on {audio_path.name}...")
+    client = OpenAI(base_url=endpoint, api_key=os.environ.get("GLM_ASR_API_KEY", "EMPTY"))
+    with open(audio_path, "rb") as f:
+        result = client.audio.transcriptions.create(
+            model=GLM_ASR_MODEL_ID,
+            file=f
+        )
+    text = getattr(result, "text", None)
+    if text is None and isinstance(result, dict):
+        text = result.get("text", "")
+    return text or ""
+
+
+def transcribe_with_glm_asr(audio_path: Path, endpoint: str = None) -> str:
+    """Transcribe audio using GLM-ASR (transformers first, endpoint fallback)."""
+    endpoint = endpoint or GLM_ASR_ENDPOINT
+    prefer_endpoint = os.environ.get("GLM_ASR_PREFER_ENDPOINT", "").lower() in ("1", "true", "yes")
+    if not prefer_endpoint:
+        try:
+            return _transcribe_with_glm_asr_transformers(audio_path)
+        except ImportError:
+            pass
+    return _transcribe_with_glm_asr_endpoint(audio_path, endpoint)
+
+
+def transcribe_audio(audio_path: Path, backend: str, conn: sqlite3.Connection = None) -> str:
+    """Transcribe audio using specified backend. Uses cache if available."""
+    # Check cache first
+    if conn:
+        cached = get_cached_transcript(audio_path, backend, conn)
+        if cached:
+            log.info(f"  Using cached transcript ({backend})")
+            return cached
+
+    # Transcribe
+    if backend == 'funasr_nano':
+        transcript = transcribe_with_funasr(audio_path)
+    elif backend == 'glm_asr':
+        transcript = transcribe_with_glm_asr(audio_path)
+    else:
+        raise ValueError(f"Unknown transcription backend: {backend}")
+
+    # Cache result
+    if conn and transcript:
+        cache_transcript(audio_path, backend, transcript, conn)
+
+    return transcript
+
+
+def align_transcript_to_audio(audio_path: Path, transcript: str, word: str) -> list[dict]:
+    """Force-align transcript to audio and find word occurrences.
+
+    Uses torchaudio MMS_FA for character-level alignment (supports 1000+ languages).
+    Returns list of occurrences with {start, end, text, confidence, found_variant}.
+    """
+    try:
+        import torch
+        import torchaudio
+        from torchaudio.pipelines import MMS_FA
+    except ImportError:
+        raise RuntimeError("Forced alignment requires: pip install torch torchaudio")
+
+    log.info(f"  Running forced alignment on {audio_path.name}...")
+
+    # Load and resample audio to 16kHz
+    waveform, sr = torchaudio.load(str(audio_path))
+    if sr != 16000:
+        waveform = torchaudio.functional.resample(waveform, sr, 16000)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)  # Mono
+
+    # Get emission from MMS model
+    device = "mps" if torch.backends.mps.is_available() else "cpu"
+    bundle = MMS_FA
+    model = bundle.get_model().to(device)
+    with torch.no_grad():
+        emission, _ = model(waveform.to(device))
+
+    # Get dictionary for tokenization
+    dictionary = bundle.get_dict()
+
+    # Clean transcript for alignment (Chinese characters only)
+    clean_text = ''.join(c for c in transcript if '\u4e00' <= c <= '\u9fff' or c.isascii())
+    chars = list(clean_text)
+
+    if not chars:
+        log.warning("No alignable characters in transcript")
+        return []
+
+    # Tokenize (map characters to token IDs)
+    unk_id = dictionary.get("<unk>", 0)
+    tokens = [dictionary.get(c.lower(), unk_id) for c in chars]
+
+    # Run forced alignment
+    targets = torch.tensor([tokens], dtype=torch.int32, device=device)
+    try:
+        alignments, scores = torchaudio.functional.forced_align(
+            emission, targets, blank=0
+        )
+    except Exception as e:
+        log.error(f"Forced alignment failed: {e}")
+        return []
+
+    # Convert frame indices to timestamps
+    num_frames = emission.shape[1]
+    audio_duration = waveform.shape[1] / 16000
+    frame_duration = audio_duration / num_frames
+
+    # Build character-level spans
+    char_spans = []
+    alignments = alignments[0].cpu().tolist()
+    scores = scores[0].cpu().tolist()
+
+    char_idx = 0
+    for i, (token_id, score) in enumerate(zip(alignments, scores)):
+        if token_id != 0:  # Skip blank tokens
+            if char_idx < len(chars):
+                char_spans.append({
+                    'char': chars[char_idx],
+                    'start': i * frame_duration,
+                    'end': (i + 1) * frame_duration,
+                    'score': score,
+                })
+                char_idx += 1
+
+    # Find word occurrences in character spans
+    variants = get_word_variants(word)
+    occurrences = []
+
+    full_text = ''.join(s['char'] for s in char_spans)
+    for variant in variants:
+        idx = 0
+        while True:
+            pos = full_text.find(variant, idx)
+            if pos == -1:
+                break
+
+            # Get timing from character spans
+            word_chars = char_spans[pos:pos + len(variant)]
+            if word_chars:
+                start = word_chars[0]['start']
+                end = word_chars[-1]['end']
+                confidence = sum(s['score'] for s in word_chars) / len(word_chars)
+
+                # Get surrounding context
+                context_start = max(0, pos - 10)
+                context_end = min(len(char_spans), pos + len(variant) + 10)
+                context = ''.join(s['char'] for s in char_spans[context_start:context_end])
+
+                occurrences.append({
+                    'start': start,
+                    'end': end,
+                    'text': context,
+                    'confidence': confidence,
+                    'found_variant': variant,
+                })
+
+            idx = pos + 1
+
+    log.info(f"  Alignment found {len(occurrences)} occurrences of '{word}'")
+    return occurrences
+
+
+def localize_word_with_backend(audio_path: Path, word: str, backend: str,
+                                conn: sqlite3.Connection = None) -> list[dict]:
+    """Find word timing using specified ASR backend.
+
+    For whisper backends: uses native word timestamps.
+    For other backends: uses transcription + forced alignment.
+    """
+    if backend in ('whispercpp', 'mlx_whisper'):
+        # Use native word timestamps
+        return localize_word_with_asr(audio_path, word)
+
+    # Transcribe-then-align approach
+    transcript = transcribe_audio(audio_path, backend, conn)
+    if not transcript:
+        return []
+
+    # Check if word appears in transcript
+    variants = get_word_variants(word)
+    if not any(v in transcript for v in variants):
+        log.info(f"  Word '{word}' not found in transcript")
+        return []
+
+    return align_transcript_to_audio(audio_path, transcript, word)
 
 
 # =============================================================================
@@ -1220,7 +1531,8 @@ class AudioClip:
 
 
 def create_clip_from_hit(word: str, hit: dict, output_dir: Path,
-                         temp_dir: Path = None) -> Optional[AudioClip]:
+                         temp_dir: Path = None, backend: str = 'whispercpp',
+                         conn: sqlite3.Connection = None) -> Optional[AudioClip]:
     """Create audio clip from a search hit (supports multiple source types)."""
     source_type = hit.get('source_type', 'youtube')
     video_id = hit['video_id']
@@ -1229,7 +1541,7 @@ def create_clip_from_hit(word: str, hit: dict, output_dir: Path,
     if source_type == 'youtube':
         return _create_youtube_clip(word, hit, output_dir)
     elif source_type == 'podcast':
-        return _create_podcast_clip(word, hit, output_dir, temp_dir)
+        return _create_podcast_clip(word, hit, output_dir, temp_dir, backend, conn)
     elif source_type == 'wenetspeech':
         return _create_wenetspeech_clip(word, hit, output_dir)
     else:
@@ -1283,7 +1595,8 @@ def _create_youtube_clip(word: str, hit: dict, output_dir: Path) -> Optional[Aud
 
 
 def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
-                         temp_dir: Path = None) -> Optional[AudioClip]:
+                         temp_dir: Path = None, backend: str = 'whispercpp',
+                         conn: sqlite3.Connection = None) -> Optional[AudioClip]:
     """Create clip from podcast source (requires ASR for timing)."""
     episode_id = hit['episode_id']
     audio_url = hit.get('audio_url')
@@ -1294,6 +1607,7 @@ def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
         return None
 
     log.info(f"  Processing podcast episode: {hit['title'][:40]}...")
+    log.info(f"  ASR backend: {backend}")
 
     # Use temp directory for ASR processing
     if temp_dir is None:
@@ -1301,7 +1615,7 @@ def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
 
     # Run ASR to find precise timing
     log.info(f"  Running ASR to locate '{word}' in audio...")
-    occurrences = smart_asr_localize(audio_url, word, duration, temp_dir)
+    occurrences = smart_asr_localize(audio_url, word, duration, temp_dir, backend, conn)
 
     if not occurrences:
         log.warning(f"  Word '{word}' not found in podcast audio (ASR)")
@@ -1337,6 +1651,12 @@ def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
 
     log.info(f"  Created podcast clip and cloze for '{word}'")
 
+    # Determine timing confidence based on backend
+    if backend in ('whispercpp', 'mlx_whisper'):
+        timing_conf = 'asr_verified'
+    else:
+        timing_conf = 'forced_align_char'
+
     return AudioClip(
         word=word,
         video_id=episode_id,
@@ -1348,7 +1668,7 @@ def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
         word_end=word_end_rel,
         source_url=audio_url,
         source_type='podcast',
-        timing_confidence='asr_verified'
+        timing_confidence=timing_conf
     )
 
 
@@ -1414,7 +1734,8 @@ def _create_wenetspeech_clip(word: str, hit: dict, output_dir: Path) -> Optional
 
 def process_word_from_index(conn: sqlite3.Connection, word: str,
                            output_dir: Path, max_clips: int = 2,
-                           sources: list[str] = None) -> list[AudioClip]:
+                           sources: list[str] = None,
+                           backend: str = 'whispercpp') -> list[AudioClip]:
     """Process a word using the unified multi-source index."""
     log.info(f"\n{'='*60}")
     log.info(f"MINING: {word}")
@@ -1449,7 +1770,7 @@ def process_word_from_index(conn: sqlite3.Connection, word: str,
             log.info(f"    Channel: {hit['channel']}")
             log.info(f"    Context: {hit['context'][:60]}...")
 
-            clip = create_clip_from_hit(word, hit, output_dir, temp_path)
+            clip = create_clip_from_hit(word, hit, output_dir, temp_path, backend, conn)
             if clip:
                 clips.append(clip)
 
@@ -1466,6 +1787,16 @@ def cmd_mine(args):
         log.error("Run 'index' command first to build the subtitle index")
         return
 
+    # Get ASR backend (convert CLI arg format)
+    backend = getattr(args, 'asr_backend', 'whispercpp').replace('-', '_')
+
+    # Set GLM endpoint if using GLM-ASR
+    if backend == 'glm_asr' and hasattr(args, 'glm_endpoint'):
+        global GLM_ASR_ENDPOINT
+        GLM_ASR_ENDPOINT = args.glm_endpoint
+
+    log.info(f"Using ASR backend: {backend}")
+
     conn = sqlite3.connect(str(db_path))
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -1476,7 +1807,8 @@ def cmd_mine(args):
 
     new_clips = []
     for word in args.words:
-        clips = process_word_from_index(conn, word, output_dir, max_clips=args.num_clips)
+        clips = process_word_from_index(conn, word, output_dir,
+                                        max_clips=args.num_clips, backend=backend)
         new_clips.extend(clips)
 
     conn.close()
@@ -2002,6 +2334,11 @@ Examples:
     mine_parser.add_argument('--db', default='vocab.db', help='Database path')
     mine_parser.add_argument('-o', '--output', default='./audio_clips', help='Output directory')
     mine_parser.add_argument('-n', '--num-clips', type=int, default=2, help='Clips per word')
+    mine_parser.add_argument('--asr-backend', default='whispercpp',
+                             choices=['whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'],
+                             help='ASR backend for podcast timing (default: whispercpp)')
+    mine_parser.add_argument('--glm-endpoint', default='http://127.0.0.1:8000/v1',
+                             help='Optional OpenAI-compatible /audio/transcriptions endpoint (set GLM_ASR_PREFER_ENDPOINT=1)')
 
     # STATS command
     stats_parser = subparsers.add_parser('stats', help='Show index statistics')

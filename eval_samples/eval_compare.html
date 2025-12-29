@@ -1,0 +1,2099 @@
+<!DOCTYPE html>
+<html lang="zh">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>ASR Accuracy Evaluation</title>
+    <style>
+        * { box-sizing: border-box; }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            max-width: 1400px;
+            margin: 0 auto;
+            padding: 20px;
+            background: #f5f5f5;
+        }
+        h1, h2 { text-align: center; color: #333; }
+        .section-title { margin-top: 40px; border-bottom: 2px solid #2196F3; padding-bottom: 10px; }
+        .stats {
+            display: flex;
+            justify-content: center;
+            gap: 30px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .stat-card {
+            background: white;
+            padding: 15px 25px;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            text-align: center;
+        }
+        .stat-card h3 { margin: 0; color: #666; font-size: 14px; }
+        .stat-card .value { font-size: 24px; font-weight: bold; color: #2196F3; }
+        .benchmark-section {
+            background: white;
+            border-radius: 8px;
+            padding: 20px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .benchmark-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+            gap: 20px;
+            margin-top: 20px;
+        }
+        .benchmark-card {
+            background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+            color: white;
+            border-radius: 12px;
+            padding: 20px;
+            text-align: center;
+        }
+        .benchmark-card.whisper { background: linear-gradient(135deg, #11998e 0%, #38ef7d 100%); }
+        .benchmark-card.mlx { background: linear-gradient(135deg, #ee0979 0%, #ff6a00 100%); }
+        .benchmark-card.funasr { background: linear-gradient(135deg, #4776E6 0%, #8E54E9 100%); }
+        .benchmark-card.glm { background: linear-gradient(135deg, #F7971E 0%, #FFD200 100%); }
+        .benchmark-card h4 { margin: 0 0 15px 0; font-size: 18px; }
+        .speed-value { font-size: 48px; font-weight: bold; }
+        .speed-label { font-size: 14px; opacity: 0.9; }
+        .benchmark-details { margin-top: 15px; font-size: 13px; opacity: 0.85; }
+        .speed-bar-container {
+            margin-top: 20px;
+            background: rgba(255,255,255,0.2);
+            border-radius: 8px;
+            overflow: hidden;
+            height: 24px;
+            position: relative;
+        }
+        .speed-bar {
+            height: 100%;
+            background: rgba(255,255,255,0.4);
+            transition: width 0.3s ease;
+        }
+        .speed-bar-label {
+            position: absolute;
+            right: 10px;
+            top: 50%;
+            transform: translateY(-50%);
+            font-size: 12px;
+            font-weight: bold;
+        }
+        .filters {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            margin: 20px 0;
+            flex-wrap: wrap;
+        }
+        .filter-btn {
+            padding: 8px 16px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 20px;
+            cursor: pointer;
+            transition: all 0.2s;
+        }
+        .filter-btn:hover { background: #e3f2fd; }
+        .filter-btn.active { background: #2196F3; color: white; border-color: #2196F3; }
+        .sample {
+            background: white;
+            border-radius: 8px;
+            margin: 20px 0;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+        .sample-header {
+            background: #2196F3;
+            color: white;
+            padding: 15px 20px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 10px;
+        }
+        .sample-header h3 { margin: 0; font-size: 16px; }
+        .sample-meta { font-size: 12px; opacity: 0.9; }
+        .sample-type {
+            background: rgba(255,255,255,0.2);
+            padding: 4px 12px;
+            border-radius: 12px;
+            font-size: 12px;
+        }
+        .audio-player {
+            padding: 15px 20px;
+            background: #fafafa;
+            border-bottom: 1px solid #eee;
+        }
+        .audio-player audio { width: 100%; }
+        .transcriptions {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+            gap: 1px;
+            background: #eee;
+        }
+        .transcription {
+            background: white;
+            padding: 15px;
+        }
+        .transcription-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 10px;
+            padding-bottom: 10px;
+            border-bottom: 1px solid #eee;
+        }
+        .backend-name {
+            font-weight: bold;
+            color: #333;
+        }
+        .backend-time {
+            font-size: 12px;
+            color: #666;
+        }
+        .transcription-text {
+            font-size: 15px;
+            line-height: 1.8;
+            color: #333;
+            white-space: pre-wrap;
+            word-break: break-all;
+        }
+        .error { color: #f44336; font-style: italic; }
+        .rating-buttons {
+            display: flex;
+            gap: 5px;
+            margin-top: 10px;
+        }
+        .rating-btn {
+            padding: 5px 10px;
+            border: 1px solid #ddd;
+            background: white;
+            border-radius: 4px;
+            cursor: pointer;
+            font-size: 12px;
+        }
+        .rating-btn:hover { background: #f0f0f0; }
+        .rating-btn.selected { background: #4CAF50; color: white; border-color: #4CAF50; }
+        .rating-btn.selected.poor { background: #f44336; border-color: #f44336; }
+        .rating-btn.selected.ok { background: #ff9800; border-color: #ff9800; }
+        .summary-table {
+            width: 100%;
+            border-collapse: collapse;
+            margin: 20px 0;
+            background: white;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .summary-table th, .summary-table td {
+            padding: 12px 15px;
+            text-align: left;
+            border-bottom: 1px solid #eee;
+        }
+        .summary-table th { background: #f5f5f5; font-weight: 600; }
+        .export-btn {
+            display: block;
+            margin: 20px auto;
+            padding: 12px 24px;
+            background: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 8px;
+            font-size: 16px;
+            cursor: pointer;
+        }
+        .export-btn:hover { background: #45a049; }
+    </style>
+</head>
+<body>
+    <h1>🎙️ ASR Accuracy Evaluation</h1>
+
+    <div class="stats">
+        <div class="stat-card">
+            <h3>Total Samples</h3>
+            <div class="value">30</div>
+        </div>
+        <div class="stat-card">
+            <h3>YouTube</h3>
+            <div class="value">18</div>
+        </div>
+        <div class="stat-card">
+            <h3>Podcast</h3>
+            <div class="value">12</div>
+        </div>
+    </div>
+
+    <h2 class="section-title">Benchmark: Speed Comparison</h2>
+    <div class="benchmark-section">
+        <p style="text-align:center;color:#666;">Average transcription speed for 45-second audio samples</p>
+        <div class="benchmark-grid">
+
+            <div class="benchmark-card whisper">
+                <h4>Whisper-Large-V3</h4>
+                <div class="speed-value">12.5x</div>
+                <div class="speed-label">realtime speed</div>
+                <div class="benchmark-details">
+                    Avg: 3.8s per 45s audio<br>
+                    30 samples, 0 errors
+                </div>
+                <div class="speed-bar-container">
+                    <div class="speed-bar" style="width: 88%"></div>
+                </div>
+            </div>
+
+            <div class="benchmark-card funasr">
+                <h4>Fun-ASR-Nano</h4>
+                <div class="speed-value">12.2x</div>
+                <div class="speed-label">realtime speed</div>
+                <div class="benchmark-details">
+                    Avg: 4.1s per 45s audio<br>
+                    30 samples, 0 errors
+                </div>
+                <div class="speed-bar-container">
+                    <div class="speed-bar" style="width: 86%"></div>
+                </div>
+            </div>
+
+            <div class="benchmark-card glm">
+                <h4>GLM-ASR</h4>
+                <div class="speed-value">14.1x</div>
+                <div class="speed-label">realtime speed</div>
+                <div class="benchmark-details">
+                    Avg: 4.2s per 45s audio<br>
+                    30 samples, 0 errors
+                </div>
+                <div class="speed-bar-container">
+                    <div class="speed-bar" style="width: 100%"></div>
+                </div>
+            </div>
+
+        </div>
+    </div>
+
+    <h2 class="section-title">Transcription Comparison</h2>
+    <div class="filters">
+        <button class="filter-btn active" onclick="filterSamples('all')">All</button>
+        <button class="filter-btn" onclick="filterSamples('youtube')">YouTube</button>
+        <button class="filter-btn" onclick="filterSamples('podcast')">Podcast</button>
+    </div>
+
+    <div id="samples">
+
+        <div class="sample" data-type="youtube" id="sample-0">
+            <div class="sample-header">
+                <div>
+                    <h3>同一個城市內橫跨歐洲到亞洲只要10分鐘! 但是伊斯坦堡的物價讓我驚呆了🤯</h3>
+                    <div class="sample-meta">阿滴英文 • 293s - 338s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_nsRLSVkWKXs_293.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.7s (12.2x RT) • 271 chars</span>
+                    </div>
+                    <div class="transcription-text">所以这两个柱子特别短因为他们下面拿了别人的雕像当地基有一些学者是说可能是拜三庭帝国为了要表示对于这种比较异教类的质押其实也不错這也是頗過分的我就覺得很諷刺大家都在做一模一樣的事情Justina她蓋了阿亞索菲亞然後她把其他宗教的神聖的雕像把它拿來當自己水庫的地基然後後來阿亞索菲亞索菲亚被厄图曼帝国打下来之后这个教堂也被改成了清真寺所以就是历史上人类都在做重复的事情这个更过分这个是整个道理耶看起来好痛苦而且我觉得90年很有设计动线的他把兩個觀光熱點放在整個水宮的最邊邊最角落大家一定要走all the way進來然後繞一圈出去1500年的水牢</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(0, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(0, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(0, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">14.0s (3.2x RT) • 314 chars</span>
+                    </div>
+                    <div class="transcription-text">这里，所以这两个柱子特别短，因为他们下面拿了别人的雕像当地基。有一些学者是说，可能是拜占庭帝国为了要表示对于这种比较异教类的质押，其实也是颇过分啦。我就觉得很讽刺，大家都在做一模一样的事情。Justinian 他盖了阿亚索菲亚，然后他把其他宗教的神圣的雕像把它拿来当自己水库的地基，然后后来阿亚索菲亚被厄图曼帝国打下来之后，这个教堂也被改成了清真寺。所以就是历史上人类都在做重复的事情。哦，这个更过分，这个是整个倒立欸，看起来好痛苦。而且我觉得 Justinian 很有设计动线的这个概念，是啊，他把两个观光热点放在了整个水宫的最边边最角落，大家一定要走 all the way 进来，然后绕一圈出去1500年的水牢。好，第二个</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(0, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(0, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(0, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">17.5s (2.6x RT) • 294 chars</span>
+                    </div>
+                    <div class="transcription-text">这里，所以这两个柱子特别短，因为他们下面拿了别人的雕像当地基。有一些学者是说可能是拜占庭帝国为了要表示对于这种比较异教类的制压，其实也是颇过分了。我就是很讽刺，大家都在做一模一样的事情。就新年他盖了阿雅索菲亚，然后他把其他宗教的神圣的雕像把他拿来当自己水库的地基。然后后来阿雅索菲亚被鄂图曼帝国打下来之后，这个教堂也被改成了清真寺。所以就是历史上人类都在做重复的事情。哦，这个更过分，这个是整个倒立耶，看起来好痛苦。而且我觉得九星殿很有设计动线的这个概念，他把两个观光热点放在呢整个水宫的最边边最角落，大家一定要走all the way进来，然后绕一圈出去，一千五百年的水牢。好，第二个。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(0, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(0, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(0, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-1">
+            <div class="sample-header">
+                <div>
+                    <h3>連國外病人都要來台灣就醫！？全球只有兩個國家擁有的癌症治療技術，到底強在哪？</h3>
+                    <div class="sample-meta">泛科學PanSci • 375s - 420s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_jB5uvBtitGs_375.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.5s (12.8x RT) • 246 chars</span>
+                    </div>
+                    <div class="transcription-text">時間從10多分鐘到超過1個小時不等才能結束整個療程但是接受BNC的病人從頭到尾就只要照射一次通常半小時左右就完成治療少數病人因為病情嚴重,需要多照一次不管如何,癌友花費的時間跟精力都遠少於一般放療第三個優點是副作用少因為BNCT是藉助膨食藥物從身體地圖上揪出腫瘤的位置就像揮動一把精細的手術刀一顆一顆的剔除癌細胞減少傷到自己大幅降低副作用不過因為熱中子射線會穿過頭皮在台灣團隊的臨床經驗中病友還是會掉頭髮少數病人也可能短暫如內壓上升在另一個擁有BNCT技術的日本也有觀察到病人出現口腔黏膜發炎</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(1, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(1, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(1, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.1s (11.0x RT) • 272 chars</span>
+                    </div>
+                    <div class="transcription-text">时间从十多分钟到超过一个小时不等才能结束整个疗程，但是接受 BNC 的病人从头到尾就只要照射一次，通常半小时左右就完成治疗。少数病人因为病情严重需要多照一次，不管如何，癌友花费的时间跟精力都远少于一般放疗。第三个优点呢，是副作用少。因为 BNCT 是借助膨石药物从身体地图上揪出肿瘤的位置，就像挥动一把精细的手术刀，一颗一颗的剔除癌细胞，减少伤到自己，大幅降低副作用。不过因为热中子射线会穿过头皮射入大脑，在台湾团队的临床经验中，病友还是会掉头发，少数病人也可能短暂如内压上升。在另一个拥有 BNC 技术的日本，也有观察到病人出现口腔黏膜发炎。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(1, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(1, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(1, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.7s (12.0x RT) • 277 chars</span>
+                    </div>
+                    <div class="transcription-text">时间从十多分钟到超过一个小时不等才能结束整个疗程，但是接受B N C T的病人从头到尾就只要照射一次，通常半小时左右就完成治疗。少数病人因为病情严重需要多照一次。不管如何，癌友花费的时间跟精力都远少于一般放疗。第三个优点呢是副作用少，因为B N C T是借助同位素射线从身体地图上揪出肿瘤的位置，就像挥动一把精细的手术刀。一颗一颗的剔除癌细胞，减少伤到自己，大幅降低副作用。不过因为热中子射线会穿过头皮射入大脑，在台湾团队的临床经验中，病友还是会掉头发，少数病人也可能短暂如内压上升。在另一个拥有B N C T技术的日本，也有观察到病人出现口腔黏膜发炎。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(1, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(1, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(1, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-2">
+            <div class="sample-header">
+                <div>
+                    <h3>AI高速發展，人人都想分一杯羹！新創公司還有活路嗎？中美AI大戰誰會勝出？ft. 科技浪 哈利《強者我朋友》EP 143...</h3>
+                    <div class="sample-meta">志祺七七 • 151s - 196s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_T34BPbI-U3w_151.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.4s (13.1x RT) • 296 chars</span>
+                    </div>
+                    <div class="transcription-text">出名的當然這個轉文字這邊也是語音相關的他們也做得很好好 那第二個你覺得最強的圖片生成模型是哪一個這個問題你如果是昨天問我的話我應該會跟你說ChargerGPT的GPT-4O生土但是昨天晚上Google推出了一個新的模型叫做這個NanoBanana原本大家叫NanoBanana算是一個代號但它其實官方名字叫做2.5 flash 的深圖今天早上用了我就覺得字體答案應該換了最強的模型是Nano Banana我覺得這就反映了現在模型進步的速度真的好快喔對感覺好像上大概三个月你就会我以前的认知被推翻了没错再来你觉得哪一个AI工具可能最适合用来整理会议的记录或者是可能在上课的笔记我觉得如果你的手机</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(2, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(2, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(2, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.1s (10.9x RT) • 342 chars</span>
+                    </div>
+                    <div class="transcription-text">出名的。当然这个转文字这边也是语音相关的，他们也做的很好。好，那第二个，你觉得最强的图片生成模型是哪一个？这个问题你如果是昨天问我的话，我应该会跟你说 ChatGPT 的 GPT 四欧生图嘛。但是昨天晚上 Google 推出了一个新的模型，对对，叫做这个 nano banana 嗯，原本就是大家叫 nano banana 算是一个代号，但它其实官方名字叫做2.5Flash 的生图，今天早上用了我就觉得这题答案应该换了，最强的模型是 nano banana 我觉得这就反映了现在模型进步的速度真的好快哦。对，感觉好像基本上大概三个月你就会，诶，我以前的认知被推翻了，没错，没错。再来呃你觉得哪一个 AI 工具可能最适合用来整理会议的记录，或者是可能在上课的笔记？我觉得如果你的手机。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(2, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(2, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(2, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.8s (11.7x RT) • 330 chars</span>
+                    </div>
+                    <div class="transcription-text">出名的当然这个转文字这边也是语音相关的，他们也做的很好。好，那第二个你觉得最强的图片生成模型是哪一个？这个问题你如果是昨天问我的话，我应该会跟你说Chat GPT的GPT-4-0生图嘛，但是昨天晚上Google推出了一个新的模型哦，对对，叫做这个Nano Banana。原本就是大家叫Nano Banana算是一个代号，但是它其实官方名字叫做2.5 Flash的生图。今天早上用了，我就觉得字体答案应该换了，最强的模型是Nano Banana。我觉得这就反映了现在模型进步的速度真的好快哦。对，感觉好像基本上大概三个月你就会哎，我以前的认知被推翻了，没错，没错，再来呃你觉得哪一个AI工具可能最适合用来整理会议的记录，或者是可能在上课的笔记？我觉得如果你的时候</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(2, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(2, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(2, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-3">
+            <div class="sample-header">
+                <div>
+                    <h3>被台灣社會遺忘的2500個孩子⋯育幼院的生活有多殘酷？為何不是孤兒卻得住進機構？ft. 蜕變方成事創辦人 文國士《強者我...</h3>
+                    <div class="sample-meta">志祺七七 • 1044s - 1089s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_NdwjFl9huhs_1044.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.7s (12.2x RT) • 273 chars</span>
+                    </div>
+                    <div class="transcription-text">育幼院照顾一个孩子一个月到底要花多少钱对如果我们抓一个平均数一个月的成本大概是8万块哇对那原因是因为在育幼院照顾孩子是一份工作嘛所以你要把人事成本的成本貪進去那就現況底下8萬塊的成本個性是不一定但政府安置一個海質道機構政府大概出1/3到1/2它是一個補助的概念那剩下的要怎麼來就要捐贈嗎都会是机构的自筹款连带的有另外一个问题是法规其实有规定育幼院里面的照顾比譬如说1:6假设志祺育幼院照顾30个孩子那你就需要5位的人士这样子就合规了可是这样的意思是这5个工作人员一天要工作24小时一年要工作365天可是现况里面政府也没有办法做更严谨或更精确的规范</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(3, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(3, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(3, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.2s (10.8x RT) • 301 chars</span>
+                    </div>
+                    <div class="transcription-text">幼院照顾一个孩子，一个月到底要花多少钱？对，如果我们抓一个平均数，一个月的成本大概是八万块。哇，对，那原因是因为在幼院照顾孩子是一份工作嘛。嗯，所以你要把人事成本摊进去，那就现况底下八万块的成本，各县市不一定，但政府安置一个孩子到机构，政府大概出三分之一到二分之一，它是一个补助的概念。那剩下的要怎么来叫做捐赠呢？都会是呃机构的自筹款，连带的有另外一个问题是法规其实有规定，幼院里面的照顾比比如说一比六，假设自己幼院照顾三十个孩子，嗯，那你就需要五位的人事成本这样子就合规了。可是这样的意思是这五个工作人员一天要工作二十四小时，一年要工作三百六十五天。可是现况里面政府也没有办法做更严谨或更精确的规范。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(3, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(3, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(3, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.8s (12.0x RT) • 306 chars</span>
+                    </div>
+                    <div class="transcription-text">育幼院照顾一个孩子一个月到底要花多少钱？对，如果我们抓一个平均数，一个月的成本大概是八万块。哇，对，那原因是因为在育幼院照顾孩子是一份工作嘛，嗯，所以你要把人事成本摊进去，那就现况底下八万块的成本，个限是不一定，但政府安置一个孩子到机构，政府大概出三分之一到两分之一，它是一个补助的概念。那剩下的要怎么来，就要捐赠了，都会是呃机构的自筹款。连带的有另外一个问题是，法规其实有规定育幼院里面的照顾比譬如说一比六，假设自体育幼院照顾三十个孩子，嗯，那你就需要五位的人事成本，这样子就合规了。可是这样的意思是这五个工作人员一天要工作二十四小时，一年要工作三百六十五天，可是现况里面政府也没有办法做更严谨或更精确的规范。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(3, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(3, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(3, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-4">
+            <div class="sample-header">
+                <div>
+                    <h3>律師工程師都搶著去？全球詐騙產業到底有多賺錢？打詐為何越打越多？｜志祺七七</h3>
+                    <div class="sample-meta">志祺七七 • 362s - 407s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_KjcG5-jFj80_362.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.6s (12.3x RT) • 267 chars</span>
+                    </div>
+                    <div class="transcription-text">因此對於詐騙園區的做法睜一隻眼閉一隻眼而在菲律賓也被爆出詐騙集團成員去加入民意代表或首長選舉透過滲透政治獲得更大的保護傘就算當地政府受到一些壓力、有心想要打詐騙這又會遇到第二個難點詐騙集團高度組織化的問題比如泰國政府曾經嘗試對園區斷網斷電但是這些集團靠著充足的財力、技術和組織,居然可以自家VPN用星鏈連上網路等等方式,持續運作下去那因為組織跟SOP非常完整這些詐騙集團跟傳統的黑幫運作方式很不一樣過去只要抓到老大,集團就會瓦解現在就算警方成功抓到詐騙的幕後手腦其他人也很快就可以複製同樣的模式,東山再起這就有點像是公司就算換了CEO</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(4, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(4, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(4, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.9s (11.6x RT) • 297 chars</span>
+                    </div>
+                    <div class="transcription-text">因此，对于诈骗园区的做法睁一只眼闭一只眼。而在菲律宾呢，也被爆出有诈骗集团成员去加入民意代表或是首长选举，透过渗透政治获得更大的保护伞。那就算当地政府受到一些压力，有心想要打诈骗，这又会遇到第二个难点，诈骗集团高度组织化的问题。比如太古政府呢，曾经尝试对园区断网断电，但是这些集团靠着充足的财力、技术还有组织，居然可以自家VPN、用星链、连上网络等等方式持续的运作下去。那位组织跟SOP非常完整哦，这些诈骗集团跟传统的黑帮运作方式很不一样，过去只要抓到老大集团就会瓦解。现在呢，就算警方成功的抓到诈骗的幕后首脑，其他人也很快哦就可以复制同样的模式东山再起，而这就有点像是公司就算换了CEO，只要</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(4, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(4, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(4, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.7s (12.1x RT) • 296 chars</span>
+                    </div>
+                    <div class="transcription-text">因此，对于诈骗园区的做法睁一只眼闭一只眼，而在菲律宾呢也被爆出诈骗集团成员去加入民意代表或是首长选举，透过渗透政治获得更大的保护伞。那就算当地政府受到一些压力，有心想要打诈骗，这又会遇到第二个难点，诈骗集团高度组织化的问题。比如泰国政府呢曾经尝试对园区断网断电，但是这些集团靠着充足的财力、技术还有组织，竟然可以自驾V P N用新链连上网路等等方式持续的运作下去。组织跟S O P非常完整哦，这些诈骗集团跟传统的黑帮运作方式很不一样，过去只要抓到老大，集团就会瓦解，现在呢就算警方成功抓到诈骗的幕后手闹，其他人也很快啊就可以复制同样的模式东山再起。而这就有点像是公司，就算换了C E O，只要</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(4, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(4, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(4, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-5">
+            <div class="sample-header">
+                <div>
+                    <h3>提升安全還是增加風險？為什麼要在車上裝上百台電腦？當機了怎麼辦？ ft.威力暘電子</h3>
+                    <div class="sample-meta">泛科學PanSci • 41s - 86s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_MJdMSBy-Phw_41.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.4s (13.2x RT) • 216 chars</span>
+                    </div>
+                    <div class="transcription-text">时间回到1980年代当时的汽车工程师们有个超重要任务就是如何把汽油引擎的每一滴燃油都压榨出最大动力尽管当时还不流行节能减碳但省油就是省钱他们发现关键藏在一个肉眼几乎无法察觉的瞬间那就是火星塞的点火时机也就是点火振时你想荡秋千的时候如果要推的高那什么时候推就很重要引擎里的活塞高速上下运动点火太早或是太晚也会影响动力工程师发现,如果能把点火的精准度控制在两毫秒以内这大概就是你眨眼时间的百分之一到千分之一那引擎的效率就能提升整整一小段</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(5, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(5, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(5, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.2s (14.0x RT) • 236 chars</span>
+                    </div>
+                    <div class="transcription-text">时间回到1980年代，当时的汽车工程师们有个超重要任务，就是如何把汽油引擎的每一滴燃油都压榨出最大动力。尽管当时还不流行节能减排，但省油就是省钱呐。他们发现关键藏在一个肉眼几乎无法察觉的瞬间，那就是火星塞的点火时机，也就是点火正时。你想，荡秋千的时候如果要推得高，那什么时候推就很重要。引擎里的活塞高速上下运动，点火太早或是太晚也会影响动力，浪费燃料。工程师发现，如果能把点火的精准度控制在2毫秒以内，这大概就是你眨眼时间的1%到千分之一。那引擎的效率呢？就能提升整整1%</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(5, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(5, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(5, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.0s (15.2x RT) • 236 chars</span>
+                    </div>
+                    <div class="transcription-text">时间回到一九八零年代，当时的汽车工程师们有个超重要任务，就是如何把汽油引擎的每一滴燃油都压榨出最大动力。尽管当时还不流行节能减碳，但省油就是省钱啊。他们发现关键藏在一个肉眼几乎无法察觉的瞬间，那就是火星塞的点火时机，也就是点火正时。你想荡秋千的时候，如果要推得高，那什么时候推就很重要。引擎里的活塞高速上下运动，点火太早或是太晚也会影响动力，浪费燃料。工程师发现，如果能把点火的精准度控制在两毫秒以内，这大概就是你眨眼时间的百分之一到千分之一，那引擎的效率呢就能提升整整一</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(5, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(5, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(5, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-6">
+            <div class="sample-header">
+                <div>
+                    <h3>密集學台語七天，跟阿嬤聊天他會發現嗎😳?</h3>
+                    <div class="sample-meta">阿滴英文 • 578s - 623s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_4fYK0oBjWek_578.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">7.5s (6.0x RT) • 218 chars</span>
+                    </div>
+                    <div class="transcription-text">一日二代一好啊那这礼拜你就专心来学台语我就一直用台语跟你说那你说一句台语听听好啊马上讲一句台语让你听哦来今晚日就用台语嘛滿滿崗 浴崗綠聖你講的好像有點怪怪的你是不是沒有辦法用台語聊天啊其實我是可以用台語跟你聊天的只是可能有時候需要多適應一下讓整個對話越來越自然那你再隨便說一句台語Gimache的天氣驚厚完全不自然聲調跟變調還行嗎什麼聲調不行啊有學過了還在習慣謝謝觀眾,好喔沒問題,那一樣,那我可以先聽看看阿滴的八個調嗎?東東東東東東東</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(6, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(6, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(6, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.6s (12.4x RT) • 233 chars</span>
+                    </div>
+                    <div class="transcription-text">啊对嘞二打一。好啊那这礼拜你就专心来学台语我就一直用台语跟你说。那你你说一句台语听听。好啊马上讲一句台语让你听啊来给妈就用台语慢慢讲预感律顺。你讲的好像有点怪怪的你是不是没有办法用台语聊天啊。其实我是可以用台语跟你聊天的只是可能有时候需要多适应一下让整个对话越来越自然。那你再随便说一句台语。给妈给的天气今后。完全不自然完全不自然。我声调跟变调还行吗。怎么变调不行啊。哈哈哈但是有学过了。还在习惯中好没问题那一样那那我可以先听看看阿弟的八个调吗。咚咚咚咚呃咚呃咚咚。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(6, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(6, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(6, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.4s (13.1x RT) • 217 chars</span>
+                    </div>
+                    <div class="transcription-text">啊，delay二代一。好啊，那这礼拜你就专心来学台语，我就一直用台语跟你说。那你你说一句台语听听。好啊，马上讲一句台语让你听哦。来，kimaji就用台语慢慢讲，语港律顺。你讲得好像有点怪怪的，你是不是没有办法用台语聊天啊？其实我是可以用台语跟你聊天的，只是可能有时候需要多适应一下，让整个对话越来越自然。那你再随便说一句台语。kimaji的天气今后完全不自然，完全不自然。那一样，那那我可以先听看看阿迪的八个调吗？咚咚咚咚呃咚呃咚咚。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(6, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(6, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(6, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-7">
+            <div class="sample-header">
+                <div>
+                    <h3>香菜皮蛋豬血糕、榴槤、肉圓、草仔粿披薩⋯⋯必勝客為何要這樣搞食物？｜志祺七七</h3>
+                    <div class="sample-meta">志祺七七 • 92s - 137s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_g9yZps_ulR0_92.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.5s (13.0x RT) • 250 chars</span>
+                    </div>
+                    <div class="transcription-text">開在台北的南京東路上直到1990年,一和集團取得了經營權之後才改叫我們熟悉的「必勝客」那個時候,麥當勞才剛進台灣不久大部分的台灣人都不太熟悉這種事西式的素食,而必勝客主打高檔餐廳提供寬敞的內用空間,瞄準佳齡客群在生日或是特別的日子,一起聚餐享用披薩1993年開始,他們為了擴大客群更推出了評價的「歡樂吧!」提供沙拉、點心等吃到飽服務吸引到一群學生、上班族穩定到餐廳舉餐不過,這個主打內容的策略,很快就被被對手達美樂給攻破了1989年,達美樂進到了台灣他們跟必勝客主打的「家庭聚餐」不同看準台灣都市人口</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(7, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(7, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(7, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.7s (12.2x RT) • 255 chars</span>
+                    </div>
+                    <div class="transcription-text">开在台北的南京东路上，直到1990年颐和集团取得了经营权之后，才改叫我们熟悉的必胜客。那个时候麦当劳才刚进台湾不久，大部分的台湾人都不太熟悉这种西式的素食。而必胜客主打高档餐厅，提供宽敞的内用空间，瞄准家庭客群，在生日或是特别的日子一起聚餐享用披萨。 1993年开始，他们为了扩大客群哦，更推出了平价的欢乐霸，提供沙拉、点心等吃到饱服务，吸引到一群学生、上班族稳定到餐厅去聚餐。不过这个主打内用的策略很快就被对手达美乐给攻破了。 1989年达美乐进到了台湾，他们跟必胜客主打的家庭聚餐不同，看准台湾都市人口密。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(7, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(7, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(7, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.7s (12.3x RT) • 253 chars</span>
+                    </div>
+                    <div class="transcription-text">开在台北的南京东路上，直到一九九零年，伊赫集团取得了经营权之后，才改叫我们熟悉的必胜客。那个时候麦当劳才刚进台湾不久，大部分的台湾人都不太熟悉这种西式的素食，而必胜客主打高档餐厅，提供宽敞的内用空间，瞄准家庭客群，在生日或是特别的日子一起聚餐享用披萨。一九九三年开始，他们为了扩大客群哦，更推出了平价的欢乐吧，提供沙拉、点心等吃到饱服务，吸引到一群学生上班族稳定到餐厅去聚餐。不过这个主打内用的策略很快就被对手达美乐给攻破了。一九八九年，达美乐进到了台湾，他们跟必胜客主打的家庭聚餐不同，看准台湾都市人口。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(7, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(7, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(7, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-8">
+            <div class="sample-header">
+                <div>
+                    <h3>Batman solves the problem of people not giving up their seat...</h3>
+                    <div class="sample-meta">泛科學PanSci • 513s - 558s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_QQ_JTl07Huc_513.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">4.1s (10.9x RT) • 317 chars</span>
+                    </div>
+                    <div class="transcription-text">当主城市发现某颗恒星要爆炸了他不自己算而是把这块区域的数据丢给UNED说这区要炸了你给它处理一下UNED经过内部运算直接吐出10万年后气体冷却扩散完毕的3D状态那些什么冲击波算到死当的过程全部跳过删除根本非红之王这个 AI 外包大法让模拟速度提升了100倍以上原本要算36年的任务现在只需要115天就能搞定哎这项技术可有用了除了让人类能婉转银河系还能应用在气候变迁等需要同时兼顾小细节与大趋势的复杂模拟上有了AI科学家终于可以不用为了等模拟结果等到头都白了如果接得到700万颗CPU尼安德塔人为何灭绝这个人类演化史上最大的悬案真相可能极为简单过去关于本案的说法充满了血腥味要么是我们智人祖先拿着黑曜石长矛发动史前大屠杀不然就是气候变成</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(8, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(8, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(8, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">5.1s (8.8x RT) • 357 chars</span>
+                    </div>
+                    <div class="transcription-text">当主城市发现某颗恒星要爆炸了，他不自己算，而是把这块区域的数据丢给 UNET 说，哎，这局要炸了，你搞得出力气呢。 UNET 经过内部运算，直接吐出十万年后气体冷却扩散完毕的3D 状态，中间那些什么冲击波算到死当的过程全部跳过删除，根本飞鸿之王。这个 AI 外包大法让模拟速度提升了一百倍以上，原本要算三十六年的任务现在只需要一百一十五天就能搞定。哎，这项技术可有用了？除了让人类能玩转银河系，还能应用在气候变迁等需要同时兼顾小细节与大趋势的复杂模拟上，有了 AI，科学家终于可以不用为了等模拟结果等到头都白了。如果接得到700万颗 CPU 的话，嗯，尼安德塔人为何灭绝？这个人类演化史上最大的悬案，真相可能极为简单。过去关于本案的说法充满了血腥味，要么是我们智人祖先拿着黑曜石长矛发动史前大屠杀，不然就是气候变。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(8, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(8, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(8, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">4.6s (9.9x RT) • 350 chars</span>
+                    </div>
+                    <div class="transcription-text">当主城市发现某颗恒星要爆炸了，他不自己算，而是把这块区域的数据丢给U NET说，哎，这就要炸了，你搞个处理机来。U NET经过内部运算，直接吐出十万年后气体冷却扩散完毕的三D状态，中间那些什么冲击波算到死当的过程全部跳过，删除，根本非红之王。这个A I外包大法让模拟速度提升了一百倍以上，原本要算三十六年的任务，现在只需要一百一十五天就能搞定。哎，这项技术可有用了，除了让人类能玩转银河系，还能应用在气候变迁等需要同时兼顾小细节与大趋势的复杂模拟。有了A I科学家终于可以不用为了等模拟结果等到头都白了。如果借得到七百万颗CPU的话，嗯，尼安德塔人为何灭绝？这个人类演化史上最大的悬案，真相可能极为简单。过去关于本案的说法充满了血腥味，要么是我们智人祖先拿着黑曜石长矛发动史前大屠杀，不然就是气候变。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(8, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(8, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(8, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-9">
+            <div class="sample-header">
+                <div>
+                    <h3>鍊金術成功？50年前的蘇聯衛星墜落！免開刀也能放入植入物？細菌也缺電？黑猩猩也會打節拍！【泛科學NEWS EP07】</h3>
+                    <div class="sample-meta">泛科學PanSci • 42s - 87s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_k7H9CuAUvHg_42.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.9s (11.4x RT) • 307 chars</span>
+                    </div>
+                    <div class="transcription-text">超過一公里而且他們還會搭配經典的呼喊叫聲像這樣這表示黑猩猩可能通過不同的敲打節奏跟叫聲來跟同伴進行溝通欸我說可能這部分還沒證實這發現也讓科學家推測這節奏感這種能力或許是來自我們跟黑猩猩的共同祖先哇 真是太棒了我們可以請黑猩猩一起來救害韓德科學家發明了一種不開刀也能把東西放進你體內的方法聽起來很妙也很不妙奇妙對吧加州理工的研究團隊開發出一種體內生成組織音波列印技術原理是這樣他們先把一種特殊的生物墨水打進體內這種墨水平常是液體裡面常有單體聚合物 奈米氣泡還有關鍵的對溫度敏感的紙紙圍囊這些圍囊裡面包著一種叫膠連劑的東西可以不顧單體們的意願把他們合成在一起變成聚合物凝膠然後跟你說大哥哥一起玩吧所以醫生們只要拿出一台</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(9, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(9, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(9, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.5s (10.0x RT) • 337 chars</span>
+                    </div>
+                    <div class="transcription-text">超过一公里，而且他们还会搭配经典的呼喊叫声，像这样。这表示黑猩猩可能通过不同的敲打节奏跟叫声来跟同伴进行沟通。哎，我是说可能这部分还没证实，这发现也让科学家推测节奏感这种能力或许是来自我们跟黑猩猩的共同祖先。哇，真是太棒了，我们可以请黑猩猩一起来就爱韩德尔了。科学家发明了一种不开刀也能把东西放进你体内的方法，听起来很妙也很不妙，对吧？加州理工的研究团队开发出一种体内深层组织音波猎鹰技术，原理是这样，他们先把一种特殊的生物墨水打进体内，这种墨水呢，平常是液体，里面藏有单体聚合物、纳米气泡，还有关键的对温度敏感的脂质微囊。这些微囊里面包着一种叫胶联剂的东西，可以不顾单体们的意愿，把它们合成在一起，变成聚合物凝胶，然后跟你说，大哥哥一起玩吧。所以医生们只要拿出一台可以聚。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(9, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(9, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(9, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">4.2s (10.8x RT) • 332 chars</span>
+                    </div>
+                    <div class="transcription-text">超过一公里，而且他们还会搭配经典的呼喊叫声，像这样，这表示黑猩猩可能通过不同的敲打节奏跟叫声来跟同伴进行沟通。哎，我是说可能这部分还没证实，这发现也让科学家推测节奏感这种能力或许是来自我们跟黑猩猩的共同祖先。哇，真是太棒了，我们可以请黑猩猩一起来就爱韩德尔了。科学家发明了一种不开刀也能把东西放进你体内的方法，听起来很妙也很不妙，对吧？加州理工的研究团队开发出一种体内生成组织音波裂解技术，原理是这样，他们先把一种特殊生物墨水打进体内，这种墨水呢平常是液体，里面藏有单体聚合物、纳米气泡，还有关键的对温度敏感的脂质微囊。这些微囊里面包着一种叫胶联剂的东西，可以不顾单体们的意愿，把它们合成在一起变成聚合物凝胶，然后跟你说，大哥哥一起玩吧。所以医生们只要拿出一台可以</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(9, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(9, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(9, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-10">
+            <div class="sample-header">
+                <div>
+                    <h3>誰說九份不好玩? 帶美國朋友挖出這裡的祕密景點😍</h3>
+                    <div class="sample-meta">阿滴英文 • 344s - 389s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_rmut2VVbO_Y_344.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.7s (12.0x RT) • 295 chars</span>
+                    </div>
+                    <div class="transcription-text">好 我們不要理她專心找Western-Eastern Hybrid TempleLike I said, it actually reflects what happened hereThe job, although perhaps it makes sense但我觉得是很困难、很危险的是的而且大部分的产业生命的期望并不是很高所以通常如果他们有足够的富裕他们会让他们的孩子去研究这个东西是他們帶來的然後他們畢業之後他們就在外國學習然後就回到這裡好有趣 我沒聽過你知道這是什麼嗎?不!所以你这样做...放在这里...然后再回答那是什么?我说的就是&quot;yau&quot;对,这是&quot;yau&quot;如果两个是背景</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(10, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(10, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(10, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.1s (10.9x RT) • 749 chars</span>
+                    </div>
+                    <div class="transcription-text">Hi Angel. Okay. We&#x27;ll be able to come and thank you for that. Western, Eastern, hybrid. Yeah, yeah, yeah. And yeah, like I said, actually reflects the, you know, what happened here. The job, although perhaps it makes pretty good money, but I think it&#x27;s it&#x27;s really hard work. It&#x27;s dangerous. Uh, true. Yeah. And most of the miners&#x27; life expectancy, it&#x27;s now really less. Well. Yeah. So usually if they&#x27;re rich enough, they would send their kids to study abroad. Yeah. Right. And after they graduated, then they learn in the foreign country and then bring back here. Interesting. I didn&#x27;t know that. And you know what this is? No. No. So you do it like this. Yeah. Try to get an answer. That&#x27;s a sign. Yeah. This is Yao. Yeah. And if it&#x27;s both backs.</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(10, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(10, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(10, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">0.9s (51.4x RT) • 18 chars</span>
+                    </div>
+                    <div class="transcription-text">Yeah, this is yao.</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(10, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(10, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(10, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-11">
+            <div class="sample-header">
+                <div>
+                    <h3>一集成本不到100元、播放量破2億！中國AI短劇憑什麼橫掃全球？演員真的要失業了嗎？｜志祺七七</h3>
+                    <div class="sample-meta">志祺七七 • 178s - 223s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_rcoPeuzgUJs_178.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.6s (12.5x RT) • 298 chars</span>
+                    </div>
+                    <div class="transcription-text">我們先開始吧!要談AI微短劇,我們首先要稍微了解一下中國的「微短劇」到底是什麼中國微短劇類似比較長的「Shorts」一集內容大概在5-10分鐘左右然後一部作品可能有上百集然後他的劇情大部分都是比較狗血爽文的類型例如是霸道總裁、穿越宮廷、轉世重生等等重點是節奏非常快,相當十幾秒就會有一個轉折反轉,然後在影片的最後,再留個懸念讓你忍不住一集接一集的看下去這幾年,這種中國微短劇可以說是非常快速的崛起去年規模已經達到 504.4 億人民幣中國整體電影票房還要高,真的是非常驚人!因為短劇市場潛力巨大,所以在2024年很快就有人想到要把AI技術用在微短劇上做「AI微短劇」而近期的代表作,就是前面提到的</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(11, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(11, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(11, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.3s (10.6x RT) • 319 chars</span>
+                    </div>
+                    <div class="transcription-text">去吧。要谈 AI 维短剧哦，我们首先呢要稍微了解一下中国的伪短剧到底是什么。中国伪短剧类似呢比较长的 short 一集内容大概在5到10分钟左右，然后一部作品可能有上百集。然后它的剧情呢大部分都是比较狗血爽文的类型哦，例如说像是霸道总裁啊、穿越宫廷、转世重生等等。重点呢是节奏非常的快，常常十几秒就会有一个转折反转，然后在影片的最后再留个悬念，让你忍不住一集接一集的看下去。这几年这种中国伪短剧可以说是非常快速的崛起，剧点规模已经达到了五百零四点四亿人民币，比中国整体电影票房还要高，真的是非常惊人。因为短剧市场潜力巨大，所以在2024年很快就有人想到要把 AI 技术用在伪短剧上面做 AI 伪短剧。而近期的代表作呢，就是前面提到的这款。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(11, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(11, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(11, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">4.2s (10.8x RT) • 314 chars</span>
+                    </div>
+                    <div class="transcription-text">去吧。要谈A I微短剧哦，我们首先呢要稍微了解一下中国的微短剧到底是什么。中国微短剧类似呢比较长的short哦，一集内容大概在五到十分钟左右，然后一部作品可能有上百集。然后它的剧情呢大部分都是比较狗血爽文的类型哦，例如说像是霸道总裁啊，穿越宫廷，转世重生等等。重点呢是节奏非常的快，相当于十几秒就会有一个转折反转，然后在影片的最后再留个悬念，让您忍不住一集接一集的看下去。这几年这种中国微短剧可以说是非常快速的崛起，去年规模已经达到了五百零四点四亿人民币，比中国整体电影票房还要高，真的是非常惊人。因为短剧市场潜力巨大，所以在二零二四年很快就有人想到要把A I技术用在微短剧上面做A I微短剧。而近期的代表作呢就是前面提到的这。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(11, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(11, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(11, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-12">
+            <div class="sample-header">
+                <div>
+                    <h3>小孩在公共場合暴走失控！是小孩太難搞、還是父母不會教？ft. 兒童職能治療師 恬兒《強者我朋友》EP 138｜志祺七七</h3>
+                    <div class="sample-meta">志祺七七 • 125s - 170s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_l5b8WP_ttwI_125.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.8s (12.0x RT) • 296 chars</span>
+                    </div>
+                    <div class="transcription-text">其实蛮多孩子他本身真的问题不大或是没有到这个诊断其实医院是没有办法帮他忙的那我觉得就很可惜所以后来我就也开了一些中心教室然后我们的老师都是跟我一样是只能治疗师傅或是一些专业背景的老师然后我们设计教材就可以让他玩当中专业的课程里面去提升他的注意力好情绪感觉统合这个部分从这个多方面的管道不管是线上還是實體的部分所以後來就不知不覺發現就接觸到五萬六千個家庭那我覺得是滿開心因為走出醫院才有辦法幫助到更多的家庭很多人可能會不知道職能治療师在干嘛所以可不可以先跟我们分享一下就是儿童的职能治疗师一天大概是怎么样子那么职能治疗师也分很多科别跟医生一样像我是专门做小儿这个领域那我就以小儿这个职能治疗师来</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(12, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(12, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(12, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.2s (10.8x RT) • 329 chars</span>
+                    </div>
+                    <div class="transcription-text">其实也蛮多孩子，他本身真的问题不大，或是没有到这个诊断，其实医院是没有办法帮他忙的。那我觉得就很可惜，所以后来我就也开了一些中心教室，然后我们的老师都是跟我一样是职能治疗师，或者是一些专业背景的老师，然后我们设计教案就可以让他玩当中哦专业的课程里面去提升他的注意力啊，哦情绪啊，感觉统合这个部分。从这个多方面的管道，不管是线上的还是实体的部分，所以后来我就不知不觉，哎，发现就接触到五万六千个家庭。那我觉得是蛮开心，因为走出医院才有办法帮助到更多的家庭。很多人可能会不知道呃，职能治疗师在干嘛。所以可不可以先跟我们分享一下，就是儿童的职能治疗师一天大概是怎么样子？我们职能治疗师也分很多科，别跟医生一样，像我是专门做小儿这个领域，那我就以小儿这个职能治疗师。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(12, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(12, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(12, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.5s (12.8x RT) • 325 chars</span>
+                    </div>
+                    <div class="transcription-text">其实蛮多孩子他本身真的问题不大，或是没有到这个诊断，其实医院是没有办法帮他忙的，那我觉得就很可惜。所以后来我就也开了一些中心教室，然后我们的老师都是跟我一样是智能治疗师，或是一些专业背景的老师。然后我们设计教案就可以让他玩当中，然后专业的课程里面去提升他的注意力啊，然后情绪啊，感觉统合这个部分。从这个多方面的管道，不管是线上的还是实体的部分，所以后来就不知不觉哎发现就接触到五万六千个家庭。那我觉得是蛮开心，因为走出医院才有办法帮助到更多的家庭。很多人可能会不知道呃智能治疗师在干嘛，所以可不可以先跟我们分享一下，就是儿童的智能治疗师一天大概是怎么样的？那么智能治疗师也分很多科别，跟医生一样，像我是专门做小儿这个领域，那我就以小儿这个智能治疗师。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(12, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(12, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(12, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-13">
+            <div class="sample-header">
+                <div>
+                    <h3>政府出手管租屋，結果房東房客都不滿？保障租期、限漲幅，真的能改善市場亂象嗎？｜志祺七七</h3>
+                    <div class="sample-meta">志祺七七 • 221s - 266s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_Tx-rDLuffTA_221.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.4s (13.1x RT) • 261 chars</span>
+                    </div>
+                    <div class="transcription-text">做了租賃專法,這個專法最大的改變是要把整個租屋市場當成一個產業來管理不過,當時這個專法主要規範的只有那種專門做租屋生意的業者,像是不動產公司或是包租業者這類型的大房東可是,台灣租屋市場上最多的其實是只有一兩間房子的小房東那這些人到底算不算是企業經營者,常常還是有爭執所以,很多的租客如果遇到租屋糾紛到底能不能用這個專法來處理其實還是很難說,保障效果有限直到2023年政府再錄的修法這次不管你是擁有有好幾棟房的大房東,還是只有一間房的小房東只要把房子租出去,都要照這部專法的規定走這個時候,租領契約才有了第一次依法開法的依據</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(13, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(13, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(13, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.9s (11.4x RT) • 281 chars</span>
+                    </div>
+                    <div class="transcription-text">做了租赁专法，这个专法最大的改变呢，是要把整个租屋市场当成一个产业来管理。不过当时这个专法主要规范的，只有那种专门做租屋生意的业者，像是不动产公司啊或者包租业者这类型的大房东。可是哦，台湾租屋市场上面最多的其实是只有一两间房子的小房东。那这些人到底算不算是企业经营者，常常还是有争议。所以很多的租客如果遇到租屋纠纷，到底能不能够用这个专法来处理，其实还是很难说，保障效果有限。那直到2023年政府再度的修法，这次不管你是拥有好几栋房的大房东，还是只有一间房的小房东，只要把房子租出去哦，都要照这部专法的规定走。这个时候租赁契约呢，才有了第一次依法开法的依据。所以</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(13, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(13, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(13, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.3s (13.7x RT) • 275 chars</span>
+                    </div>
+                    <div class="transcription-text">了租赁专法，这个专法最大的改变呢是要把整个租屋市场当成一个产业来管理。不过当时这个专法主要规范的只有那种专门做租屋生意的业者，像是不动产公司啊或者包租业者这类型的大房东。可是哦台湾租屋市场上面最多的其实是只有一两间房子的小房东。那这些人到底算不算是企业经营者，常常还是有争议。所以很多的租客如果遇到租屋纠纷，到底能不能够用这个专法来处理，其实还是很难说保障效果有限。那直到二零二三年政府再度的修法，这次不管你是拥有好几栋房的大房东，还是只有一间房的小房东，只要把房子租出去哦，都要照这部专法的规定走。这个时候租赁契约呢才有了第一次依法开法的依据。所以</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(13, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(13, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(13, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-14">
+            <div class="sample-header">
+                <div>
+                    <h3>《財劃法》修法，為何引爆台灣最大憲政危機？未來會怎麼發展？不副署不公布違憲嗎？ft. 台大法律系 柯格鐘教授《強者我朋友...</h3>
+                    <div class="sample-meta">志祺七七 • 688s - 733s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_Jf0WnTfPCOo_688.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.1s (14.6x RT) • 181 chars</span>
+                    </div>
+                    <div class="transcription-text">透过这个制度先改善因为地方自治团体普遍财政就是体质比较虚弱的这一个部分那第一次补不够我们在财政財政收支劃分法第30條裡面又在規定中央還可以再試中央的財政收入再來給地方自治團體一般補助款所以一般补助款是补统筹分配税款在改善财政体质不足的部分等于是第二道然后第三道叫计划补助款已經不是拿來做改善所謂財政體質虛弱的問題它主要是讓中央透過政策引導讓地方來配合我中央的政策</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(14, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(14, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(14, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">2.5s (17.7x RT) • 193 chars</span>
+                    </div>
+                    <div class="transcription-text">透过这个制度先改善，因为地方自治团体普遍财政就是体质比较虚弱的这一个部分。那第一次补不够，我们在财政收支划分法第三十条里面又在规定中央还可以在市中央的财政收入再来给地方自治团体一般补助款。所以一般补助款是补统筹分配税款，在改善财政体质不足的部分。等于是第二道，然后第三道叫计划补助款，这个就已经不是拿来做改善所谓财政体质虚弱的问题，它主要是让中央透过政策引导，让地方来配合我中央的政策。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(14, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(14, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(14, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.2s (20.8x RT) • 162 chars</span>
+                    </div>
+                    <div class="transcription-text">透过这个制度先改善，因为地方自治团体普遍财政就是体质比较虚弱的这一个部分。那第一次补不够，我们在财政收支划方法第三十条里面又在规定，中央还可以在市中央的财政收入再来给地方自治团体一般补助款。所以一般补助款是补统筹分配税款，这个就已经不是拿来做改善所谓财政体质虚弱的问题，它主要是让中央透过政策引导，让地方来配合我中央的政策。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(14, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(14, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(14, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-15">
+            <div class="sample-header">
+                <div>
+                    <h3>在摩洛哥10天都吃同一道菜!? 意外很好吃的「非洲火鍋」😍</h3>
+                    <div class="sample-meta">阿滴英文 • 257s - 302s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_qrg_OeZ2tcM_257.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.7s (12.1x RT) • 296 chars</span>
+                    </div>
+                    <div class="transcription-text">好嗎 我幫你倒它整個味道都是酸的耶你那次的習慣嗎 酸湯誰喝得了除非是酸辣湯我覺得有一點點像酸辣湯的感覺耶因為它裡面有很多番茄所以有番茄的酸味各種那種香味然後還有鷹嘴豆泥好奇怪喔我覺得其實不難吃耶你要不要吃吃看來 你吃你吃它有豆類我就不行好喝嗎我覺得不錯耶我其實覺得OK但我覺得它加了加那個義大利麵算是比較不尋常它看起來真的滿不好吃的但是我覺得還行啦我覺得還可以很不好吃很不好 你又沒吃過你又沒吃過你怎麼可以評論它看起來就是-看起來... -對 因為有豆類就是碗粒大炒對 碗食我覺得真的是OK耶而且因為它有加了豆類所以它會變得比較稠一點會滿吃飽的那種感覺這是我的主餐 這個是叫做Couscous</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(15, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(15, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(15, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">5.4s (8.3x RT) • 350 chars</span>
+                    </div>
+                    <div class="transcription-text">嗯。嗯，那好吧，欢迎你哦。哦，它整个味道都是酸的。我们一旦是习惯吗？酸汤直接喝得了，除非是酸辣汤。我觉得有一点点像酸辣汤的感觉，因为它里面有很多番茄，所以有番茄的酸味，各种那种呃那种香草，然后还有鹰嘴豆泥。好奇怪哦。我觉得其实不难吃哎，你要不要吃吃看？我要你是你要吃吃吃吃吃吃吃吃。对，还有豆类我觉得不行，口味。嗯，好喝吗？我觉得不错哎，我其实觉得 OK。但我觉得他加那个意大利面算是比较不寻常了，他看起来真的非常非常的好吃。蛮不好吃的，但是我觉得还行啦，我觉得还可以。看不好吃哎，很不你又没吃过啊，你又没吃过，你怎么可以评论他看起来就是看起来。对，因为豆类就是瓦嘎大茶，对，完食我觉得真的是 OK 啊。而且因为他有加了豆类，所以它会变得比较稠一点，会蛮吃饱的那种感觉。这是我的主餐，这个是叫做苦思。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(15, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(15, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(15, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.6s (12.6x RT) • 265 chars</span>
+                    </div>
+                    <div class="transcription-text">嗯，我说整个味道都是酸的诶，你那次习惯吗？酸汤谁喝得了，除非酸辣汤。我觉得有一点点像酸辣汤的感觉，因为它里面有很多番茄，所以有番茄的酸味，各种那种那种香草，然后还有鹰嘴豆泥。好奇怪哦，我觉得其实不难吃诶，你要不要试试看？啊，你说你知道这个，它有豆类，我就不行。好喝吗？我觉得不错诶，我其实觉得OK。但我觉得它加那个意大利面算是比较不寻常啊，它看起来真的蛮不好吃的，但是因为有豆类就是我要给大发。对，丸食我觉得真的是OK啊，而且因为它有加了豆类，所以它会变得比较稠一点，会蛮吃饱的那种感觉。这是我的主餐，这个是叫做couscous。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(15, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(15, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(15, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-16">
+            <div class="sample-header">
+                <div>
+                    <h3>【全程CC字幕】轟民進黨用意識型態騙選票 被爆中共介選?藍委:把韓國瑜拖下水很無聊 民主進步黨表面名有民主 心裡面毫無民...</h3>
+                    <div class="sample-meta">TVBS新聞 • 332s - 377s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_1eL5UqILgMo_332.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.4s (13.2x RT) • 266 chars</span>
+                    </div>
+                    <div class="transcription-text">絕對不會讓他得逞我們最後想問 因為你剛聽到說該怎麼做就怎麼做可是我們看起來現在行政院針對接下來一些預唆案看起來他也就是要跟立法院 也就是跟在野黨對槓火車對撞那因為這個行政院長卓榮泰他也特別的要求各部會說那你們就要有所心理準備接下來是絕對不會走回頭路的那不走回頭路就不走回頭路吧我是覺得很奇怪啦明明有另外一條路可以走 他不走嘛我們講的一項都非常非常的清楚總預算要審查 可以啊軍人待遇的邊境去嘛 警消退休就已經編進去沒有多少錢軍警銷他們那時候講一千億是50年一年20億跟當初進發補償其實沒有差太多 對吧原住民的進發補償你到最後不是就處理</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(16, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(16, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(16, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.3s (10.5x RT) • 318 chars</span>
+                    </div>
+                    <div class="transcription-text">某绝对不会让他得逞。我觉得我们最后想问呢，因为你刚提到说该怎么做就怎么做嘛，可是我们看起来现在行政院哦，针对接下来一些预算案啊，看起来他也就是要跟这个立法院，等于就是在野党对杠啦，火车队状的状况之下。那因为这个行政院长这个卓荣泰哦，他也特别的要求各部会说，哎，那你们就要有所心理准备哦，接下来是绝对不会走回头路的。那不走回头路就不走回头路吧，我是觉得很奇怪啦，真的明明有另外一条路可以走，他不走。我们讲的一项都非常非常的清楚，总预算要审查，可以啊，军人待遇的编进去嘛，警消退休金编进去没有多少钱啦。军军军军军军军警消他们那时候讲一千一是五十年呢，嗯，一年的二十几跟当初进法补偿其实没有差太多，对吧？原住民的进法补偿你到最后不是就处理的。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(16, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(16, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(16, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.9s (11.5x RT) • 317 chars</span>
+                    </div>
+                    <div class="transcription-text">某绝对不会让他得逞。因为我们最后想问呢，因为你刚刚提到说该怎么做就怎么做吧。可是我们看起来现在行政院呢，针对接下来一些预算案呢，看起来他也就是要跟这个立法院等于就是跟在野党对杠啦。火车对撞的状况之下，那因为这个行政院长这个卓荣泰哦，他也特别的要求各部会说，哎，那你们就要有所心理准备哦，接下来是绝对不会走回头路的。那不走回头路就不走回头路吧。我是觉得很奇怪了，就是明明有另外一条路可以走，他不走嘛。我们讲的一向都非常非常的清楚。总预算要审查可以啊，军人待遇的编进去嘛，警消退休金编进去没有多少钱嘛。军军军军警消他们那时候讲一千一是五十年呢，所以一年的二十亿跟当初禁法补偿其实没有差太多，对吧？原住民的禁法补偿，你知道最后不是就处理了。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(16, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(16, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(16, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="youtube" id="sample-17">
+            <div class="sample-header">
+                <div>
+                    <h3>Backstabbing and Breakthroughs?! The Transistor That Changed...</h3>
+                    <div class="sample-meta">泛科學PanSci • 228s - 273s</div>
+                </div>
+                <span class="sample-type">YOUTUBE</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="yt_f-m9FEFbF4c_228.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.7s (12.1x RT) • 254 chars</span>
+                    </div>
+                    <div class="transcription-text">0 会多出一只手也就是多出一颗相对自由的电子反过来说如果掺了只有三只手的棚就会有一颗细的电子找不到人牵手形成一个等待其他电子来作伴的电洞当这两块半导体材料距离很近并且照光参磷系半导体的电子就会获得能量而跳跃到旁边可求电子的参膨系半导体他们很快将含磷带至是由电子的半导体取为 N 型半导体含铜而出现电子空缺电动的则为 P 型半导体看来满足三集体第一个条件也就是电子或电流的流向必须具有三向性的材料找到了接下来贝尔实验室的天才同事们韦莲·肖克利、沃尔特·布拉顿约翰·巴丁相继加入研究准备开发使用半导体材料的三集体</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(17, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(17, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(17, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.7s (12.3x RT) • 268 chars</span>
+                    </div>
+                    <div class="transcription-text">有了磷，会多出一只手，也就是多出一颗相对自由的电子。反过来说，如果掺了只有三只手的硼，就会有一颗细的电子找不到人牵手，形成一个等待其他电子来作伴的电动。当这两块半导体材料距离很近，并且照光掺磷系半导体的电子，就会获得能量，而跳跃到旁边渴求电子的掺硼系半导体。他们很快将含磷带自由电子的半导体取为N型半导体，含硼而出现电子空缺，电动的则为P型半导体。看来，满足三极体第一个条件，也就是电子或电流的流向必须具有单向性的材料找到了。接下来，贝尔实验室的天才同事们威廉肖克利、沃尔特布拉顿、约翰巴丁相继加入研究，准备开发使用半导体材料的三极体。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(17, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(17, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(17, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.5s (12.7x RT) • 262 chars</span>
+                    </div>
+                    <div class="transcription-text">磷会多出一只手，也就是多出一颗相对自由的电子。反过来说，如果掺了只有三只手的硼，就会有一颗细的电子找不到人牵手，形成一个等待其他电子来作伴的电动。当这两块半导体材料距离很近并且照光，掺磷系半导体的电子就会获得能量而跳跃到旁边渴求电子的掺硼系半导体，他们很快将含磷带自由电子的半导体取为N型半导体，含硼而出现电子空缺，电动的则为P型半导体。看来满足三极体第一个条件，也就是电子或电流的流向必须具有单向性的材料找到了。接下来，贝尔实验室的天才同事们威廉肖克利、沃尔特布拉顿、约翰巴丁相继加入研究，准备开发使用半导体材料的三极体。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(17, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(17, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(17, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-18">
+            <div class="sample-header">
+                <div>
+                    <h3>The KK Show 324 - 台灣音樂劇前進百老匯 曾慧誠導演</h3>
+                    <div class="sample-meta">百靈果News • 4956s - 5001s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_822b3874_4956.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.1s (14.6x RT) • 196 chars</span>
+                    </div>
+                    <div class="transcription-text">對對為什麼就是所以大家就是錢不是邪惡的啊對所以大家要愉快一起工作就是大家窮死這樣是這樣嗎不應該是這樣大家都可以開心對啊我很好奇百老匯演員他們一年年薪大概是多少其實現在基本好像是有兩千多塊一周兩千多塊一周有鹽才有一周八場這是鹽哪樣才是一個標準我現在講的都是minimum最少對對對他們有公會我告訴你白老灰真的痛苦是什麼你知道嗎他們有60幾個公會在一個戲上你會遇到因為有演員的有音樂的有什麼編劇的</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(18, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(18, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(18, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.6s (12.4x RT) • 252 chars</span>
+                    </div>
+                    <div class="transcription-text">对对，为什么就是所以大家就是钱不是邪恶的啊。对，啊，所以所以所以大家要愉快一起工作，就是大家穷死这样。是这样吗？我我宁愿不应该这样，对不对？对啊，我我很好奇百老汇演员他们一年年薪大概是多少年？其实现在现在基本好像是两千多块，一周两千多块，一周一周，这个还有呃一周八场，这是演哪样，呃，就是他，呃，我现在讲的都是 minimum 最少，对对对对对，他们他们有工会，主要是你。百老汇真的痛苦是什么你知道吗？哈哈哈，他们有六十几个工会哦，在一个戏上你会遇到啊，因为有演员的，有音乐的，有什么，有编剧的，编剧的。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(18, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(18, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(18, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">10.7s (4.2x RT) • 1013 chars</span>
+                    </div>
+                    <div class="transcription-text">对对为什么就是所以大家就是钱不是邪恶的啊对然后所以所以所以所以大家要愉快一起工作就是大家穷死这样是这样吗我宁愿不应该不应该这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样这样</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(18, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(18, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(18, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-19">
+            <div class="sample-header">
+                <div>
+                    <h3>The KK Show 326 - 中國電動車產業內幕 Maureen</h3>
+                    <div class="sample-meta">百靈果News • 2856s - 2901s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_cc3c19a0_2856.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.1s (14.4x RT) • 206 chars</span>
+                    </div>
+                    <div class="transcription-text">這些人來跟你介紹地什麼不是詐騙對啊當然是要就是要之前要做一些準備功課嘛然後我們至少找的人當地的人也也有这些经历他们有帮其他公司开发过有一些OEM公司然后譬如说Nike啊或者是这种大厂他们可能需求不一样但是多多少少都会有认识像这样子的网络的人那可是在那边会不会有什么文化上的倡议或者是有没有需要说遇到官员然后土地开发需要塞一下的确是我有听说过那边贿赂的情况是有的譬如说在路上开车然后被警察拦下来然后你可以给他塞一点</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(19, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(19, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(19, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.0s (15.1x RT) • 249 chars</span>
+                    </div>
+                    <div class="transcription-text">这些人来给你介绍地，怎么不是诈骗？对啊，呃，当然还是要就是要之前要做一些准备功课嘛。然后我们至少找的人，当地的人也也也也有这些经历，他们有帮其他公司开发过，有一些有一些O E M公司，然后譬如说N I K E啊，或者是这种大厂，他们可能需求不一样，right？但是多多少少都会有认识像这样子的网络的人。那可是在那边会不会有什么文化上的差异，或者是有没有需要说关遇到官员，然后土地开发需要塞一些钱？哎，的确是我有听说过那边贿赂的情况，是有一譬如说在在路上开车，然后被警察拦下来，然后你可以给他塞一点。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(19, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(19, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(19, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.3s (13.7x RT) • 233 chars</span>
+                    </div>
+                    <div class="transcription-text">这些人来跟你介绍第一什么不是诈骗？对啊，呃，当然是要就是要之前要做一些准备功课嘛。然后我们至少找的人当地的人也也也也有这些经历，他们有帮其他公司开发过有一些有一些OEM公司，然后譬如说Nike啊或者是这种大厂，他们可能需求不一样，但是多多少少都会有认识像这样子的网络的人。那可是在那边会不会有什么文化上的差异？或者是有没有需要说官遇到官员，然后土地开发需要塞一些？天，的确是我有听说过那边贿赂的情况是有的，譬如说在在路上开车，然后被警察拦下来，然后你可以给他塞一点。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(19, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(19, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(19, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-20">
+            <div class="sample-header">
+                <div>
+                    <h3>vol.76 饮酒啊七舅姥爷！饮酒啊二姑妈！</h3>
+                    <div class="sample-meta">谐星聊天会 • 5181s - 5226s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_22eb481f_5181.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">4.6s (9.8x RT) • 250 chars</span>
+                    </div>
+                    <div class="transcription-text">非常的可惜贝克去了 已经开始了这位朋友没来在家准备材料呢这位朋友太可惜了开始写PPT了这个突然让我想到你们这群去年过年的时候短视频上比较流行的就是一个人突然他拍短视频 他突然站起来说你有这么高速虐待的机械进入中国基础给出的原理小的时候 等等 再来一遍他这个就是你有高速运转的机械进入中国记住我小时候给出的原理小的时候他就是一个乱码的话他学了一个人那个人也是说话没有逻辑酒桌上然后就亲戚都懵了说就是老坟那边出事了就是说说这个话就是有点有点这个意思你就说他不懂的然后他们还觉得很专业他们就得听着但这个明显</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(20, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(20, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(20, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.2s (10.6x RT) • 327 chars</span>
+                    </div>
+                    <div class="transcription-text">鹏非常的可惜，备课去了，已经开始。哈哈哈，这位朋友没来，这个准备材料呢，这朋友太可惜了，开始写 PPT 了。嗯，这个突然让我想到，你们这这去年过年的时候，短视频上比较流行的就是一个人突然他拍短视频，他突然站起来说，你有这么高速运转的机械进入中国，记住我给出的原理，小的时候，啊，这这这这这这这，就是他一个，再来，他就是他就是他这个就是你有高速运转的机械进入中国，记住我记住我小时候给出的原理小的时候，他就是一个乱码的话，但是他学了一个学了一个一个人，那个人也是说话没有逻辑，但是他就在酒桌上，然后就亲亲戚都蒙了，说就是老冯那边出事了，这是，就是说说这个话，就是有点有点这个意思，你就说他不懂的，然后他们还觉得很专业，嗯，他们就得听着，嗯嗯，但这个明显是。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(20, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(20, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(20, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.9s (15.4x RT) • 245 chars</span>
+                    </div>
+                    <div class="transcription-text">朋非常的可惜，被客气了，已经开始。这位朋友没来，在家准备材料呢。这朋友太可惜了，开始写PPT了。嗯，这个突然让我想到，你们记得去年过年的时候啊，短视频上比较流行的就是一个人突然他拍短视频，他突然站起来说，你有这么高速运转的机械进入中国，记住我给出的原理小的时候，他就是一个乱码的话，但是他学了一个一个人，那个人也是说话没有逻辑，但是他就在酒桌上，然后就亲戚都懵了，说就是老冯那边出事了，就是说说这个话，就是有点有点这个意思，你就说他不懂的，然后他妈觉得很专业，嗯，就得听着，嗯，但这个明显。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(20, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(20, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(20, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-21">
+            <div class="sample-header">
+                <div>
+                    <h3>The KK Show 329 - 印度聽眾 Akshay</h3>
+                    <div class="sample-meta">百靈果News • 4666s - 4711s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_7bd22a5f_4666.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">2.9s (15.7x RT) • 187 chars</span>
+                    </div>
+                    <div class="transcription-text">不是每一个印度人是摇头的这个摇头是一个stereotype从很多国外的人看印度人是来的还是美国的比较奠实他们摇头这样讲话但是摇头也有一个有一个原因是印度是一个很多元的国家那印度有在想法上那个关系里身上有22个语言但是实际上印度的语言是1000多1000多个语言1000多个语言如果我從academia來的時候那理智上不是每個人說我說你的語言你說我的語言比較多的語言用那個意思</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(21, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(21, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(21, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">2.2s (20.3x RT) • 196 chars</span>
+                    </div>
+                    <div class="transcription-text">是不是每一个印度人是摇头的这个摇头是一个 stereotypes从那个很多国外的人看印度人之类的还是在那个美国的比较电视是他们摇头这样讲话但是摇头也有一个有有一个原因是印度是一个很多元的国家那印度有在想法上那个关系里身上有二十二个语言但是实际上印度的语言是一千多一一千多个语言一一千多个语言那如果我从 academy 来说那历史上不是每个人学我学你的语言你你学我的语言比较多的原因用那个一些。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(21, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(21, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(21, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.3s (19.3x RT) • 197 chars</span>
+                    </div>
+                    <div class="transcription-text">是不是每一个印度人是摇头的？这个摇头是一个stereotypes，从那个很多国外的人看印度人，是来的还是是那个美国的比较电视是他们摇头这样讲话。但是摇头也有一个有有一个原因是印度是一个很多语言的国家。那印度有在想法上那个关系里上有22个语言，但是实际上印度的语言是一千多。一千多个语言。那如果我从academia来说，那历史上不是每一个人学我学你的语言，你你学我的语言，比较多的原因用那个一些。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(21, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(21, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(21, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-22">
+            <div class="sample-header">
+                <div>
+                    <h3>EP499 TAXI DRIVER</h3>
+                    <div class="sample-meta">台灣通勤第一品牌 • 659s - 704s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_631ec155_659.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">7.5s (6.0x RT) • 198 chars</span>
+                    </div>
+                    <div class="transcription-text">玩Party玩得很開心然後呢就有人在那邊說啊幹你這個藥不厲害啦這止痛藥普拿疼不夠力啊我就在那邊有放一個超猛的有Double的普拿疼對有Double的然後就Call給他那什麼什麼什麼什麼管家管家就說 欸 幫我弄一下弄過來錢不是問題一樣講出去錢不是問題快就對了噠噠噠噠噠然後就接接接打打打 倒了 嗯 你看我就跟你說吧然後一吃 哇好厲害我頭不痛了喜歡這個版本嗎你覺得呢我留下兩個懸念給司機在聊天呢問問問</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(22, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(22, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(22, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.8s (11.9x RT) • 232 chars</span>
+                    </div>
+                    <div class="transcription-text">玩 party 玩得很开心，然后呢就有人在那抓说啊，干你这个药不厉害啦，你这止痛药补拿成不够力啊，我今天没有装一个超猛的，对，我打不好，然后就扣给他那什么什么什么什么呃管家，管家在说，哎，帮我弄一下，弄过来，钱不是问题，人家讲的是钱不是问题，快就对了。哒哒哒哒哒哒哒哒哒，然后就接接接，哐当当当当当当。嗯，来看，我就跟你说吧，然后意思，哇，好厉害，我头不痛了。喜欢这个版本吗？你哈哈哈，你觉得呢？哈哈哈，我留下两个悬念给司机，哈哈哈，再聊天呢，哈哈，那问问问问问。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(22, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(22, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(22, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">9.7s (4.6x RT) • 339 chars</span>
+                    </div>
+                    <div class="transcription-text">很party玩的很开心，然后呢就有人在那说啊，干你这个药不厉害啦，这止痛药普拿他不够力啊，我叫他那个超猛的，哎有大炮的，然后就扣给他那个什么什么什么什么管家，管家就是哎帮我弄一下弄过来，钱不是问题，你这样讲出去，钱不是问题，快就对了，哒哒哒哒哒哒哒哒哒哒哒，然后就接接接，哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐哐</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(22, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(22, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(22, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-23">
+            <div class="sample-header">
+                <div>
+                    <h3>335. 认识东北作家的前提是什么？| 宝珀理想国文学奖③《仙症》</h3>
+                    <div class="sample-meta">梁文道八分 • 2274s - 2319s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_adb00897_2274.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.1s (14.5x RT) • 205 chars</span>
+                    </div>
+                    <div class="transcription-text">那么这么一来,其实学生家长的负担没有减轻,只是原来校外培训变成了校内培训,这里面当然还会有问题。就比如说如果我是个学校的老师今天是合法合理的可以在正常课时外在培训的话那我是不是把经验中华部分放到那个时候教呢我什么地方就我补课的时候多给你补点是不是那个意思呢那补课补得好的老师又会不会变成了老师学校又分等級了呢這裡面有很多很多問題您講的這個問題也是其中一個問題就我覺得這還不算是真實的在減負嘛我們負擔其實是一樣的</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(23, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(23, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(23, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.0s (15.0x RT) • 227 chars</span>
+                    </div>
+                    <div class="transcription-text">你的培训，那么这么一来呢，其实学生家长的负担没有减轻，哼，只是原来呃校外培训变成了校内培训，那这里面当然还会有问题，就比如说如果我是个学校的老师，今天是合法合理的，可以在正常课时外再培训的话，那我是不是把精华部分放到那个时候教呢？我我什么地方就就我补课的时候多给你补点，是不是那个意思呢？那补课补的好的老师又会不会变成了老师，学校又分等级了呢？这里面有很多很多问题，您讲的这个问题也是其中一个问题，就我觉得这还不算是真实的在减负嘛，我们负担其实是一样的。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(23, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(23, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(23, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.7s (16.5x RT) • 227 chars</span>
+                    </div>
+                    <div class="transcription-text">你的培训，那么这么一来呢，其实学生家长的负担没有减轻，只是原来呃校外培训变成了是校内培训，那这里面当然还会有问题。就比如说，如果我是个学校的老师，今天是合法合理的，可以在正常课时外在培训的话，那我是不是把精华部分放到那个时候教呢？我我什么地方就就我补课的时候多给你补点，是不是那个意思呢？那补课补得好的老师又会不会变成了老师，学校又分等级了呢？这里面有很多很多问题，您讲的这个问题也是其中一个问题，就我觉得这还不算是真实的在减负嘛，我们负担其实是一样的。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(23, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(23, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(23, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-24">
+            <div class="sample-header">
+                <div>
+                    <h3>314. 刘子超×梁文道：这一代旅行作家，即将面对怎样的世界？</h3>
+                    <div class="sample-meta">梁文道八分 • 1707s - 1752s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_51e99523_1707.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.2s (14.0x RT) • 198 chars</span>
+                    </div>
+                    <div class="transcription-text">地方也留下很出名的记载可是今天去的中国人就很少了你在这些旅途当中我看你的书写里面讲到的中国人几乎都是因为生活的原因去那里而不是因为旅行你是不是在整趟旅程当中都没有怎么遇到中国游客除了一些特别热门的旅行比如说萨玛尔汉有旅行团之外是不是没有人像你这么自助旅行去的呢我遇到过一个在苦展就是塔吉克斯坦北部的一个旅行团城市叫福展好像是之前说是去考证吧说是亚历山大这个东征到的最东边的一个城市最东的一个城市对</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(24, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(24, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(24, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.1s (14.7x RT) • 219 chars</span>
+                    </div>
+                    <div class="transcription-text">地方也留下很出名的记载，可是今天去的中国人就很少了。你在这些旅途当中，我看你的书写里面讲到的中国人几乎都是因为生活的原因去那里，而不是因为旅行。呃，你是不是在整趟旅程当中都没有怎么遇到中国游客？除了一些特别热门的旅行景点，比如说撒马尔罕有旅行团之外，是不是没有人像你这么自助旅行去的呢？我遇到过一个在苦展，就塔吉克斯坦北部的一个城市叫苦展。嗯，也好像是之前说是去考证吧，说是亚历山大这个东征到的最东边，是的，一个城市，最东的一个城市，对。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(24, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(24, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(24, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.8s (16.1x RT) • 219 chars</span>
+                    </div>
+                    <div class="transcription-text">地方也留下很出名的记载，可是今天去的中国人就很少了。你在这些旅途当中，我看你的书写里面讲到的中国人几乎都是因为生活的原因去那里，而不是因为旅行。呃，你是不是在整趟旅程当中都没有怎么遇到中国游客，除了一些特别热门的旅行景点，比如说萨马尔罕有旅行团之外，是不是没有人像你这么自助旅行去的呢？我遇到过一个在苦盏，就是塔吉克斯坦北部的一个城市叫苦盏，嗯，也好像是之前说是去考证吧，说是亚历山大这个东征到的最东边的一个一个城市，最东的一个城市，对。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(24, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(24, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(24, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-25">
+            <div class="sample-header">
+                <div>
+                    <h3>【随机波动142】如果世上没有娜拉的目的地，我们就去创造</h3>
+                    <div class="sample-meta">随机波动 • 733s - 778s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_2953abf9_733.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.6s (12.6x RT) • 237 chars</span>
+                    </div>
+                    <div class="transcription-text">一个状况好像是倒转过来的就是母亲已经成为了一个不婚主义者一个反对婚姻的人那这个时候当他的女儿向他提问说我是否有结婚的权利的时候觉得这是一个特别当下的问题就是因为在今天很多时候一些异性恋女性也会被攻击为恋爱脑或者婚侣的时候我们就会思考这个问题就虽然男性和爱情如此糟糕我们还有没有追求婚姻的权利就是婚姻有它的弊端的同时它是不是真的可以像艾米设想的那样给她一段成都他的关系给他一个他所真正向往而他童年不曾拥有的家庭对就当我想成为一个妻子的时候我是有错的吗我觉得这个其实是致使娜拉在</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(25, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(25, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(25, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.2s (14.0x RT) • 269 chars</span>
+                    </div>
+                    <div class="transcription-text">一个状况好像是倒转过来的，就是母亲已经成为了一个不婚主义者，一个反对婚姻的人。那这个时候，当她的女儿向她提问说我是否有结婚的权利的时候，你会觉得这是一个特别当下的问题。是，就是因为在今天很多时候一些异性恋女性也会被攻击为恋爱脑或者婚驴的时候，我们就会就会思考这个问题，就人，就虽然男性和爱情如此糟糕，我们还有没有追求婚姻的权利？就是婚姻有他的弊端的同时，他是不是真的可以像艾米设想的那样，给他一段可以承托他的关系，给他一个他所真正向往，而他童年不曾拥有的家庭。嗯，对，就当我想成为一个妻子的时候，我是有错的嘛。我觉得这个其实是致使娜拉在这</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(25, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(25, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(25, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.0s (15.0x RT) • 274 chars</span>
+                    </div>
+                    <div class="transcription-text">这个状况好像是倒转过来的，就是母亲已经成为了一个不婚主义者，一个反对婚姻的人。那这个时候，当他的女儿向他提问说：“我是否有结婚的权利？”的时候，你会觉得这是一个特别当下的问题。是，就是因为在今天很多时候，一些异性恋女性也会被攻击为恋爱脑或者婚驴的时候，我们就会就会思考这个问题。就是人就虽然男性和爱情如此糟糕，我们还有没有追求婚姻的权利？就是婚姻有它的弊端的同时，他是不是真的可以像艾米设想的那样，给他一段可以承托他的关系，给他一个他所真正向往而他童年不曾拥有的家庭？嗯，对，就当我想成为一个妻子的时候，我是有错的吗？我觉得这个其实是致使娜拉在这。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(25, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(25, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(25, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-26">
+            <div class="sample-header">
+                <div>
+                    <h3>EP467 這首歌你打幾分 ft.家家</h3>
+                    <div class="sample-meta">台灣通勤第一品牌 • 4055s - 4100s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_9d8a2939_4055.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.3s (13.8x RT) • 239 chars</span>
+                    </div>
+                    <div class="transcription-text">呃Hit song就是那個我自己的理解一些就是哎那種Hit song就是一種呃啊吊勾啊這種就是那個先把你調進來然後你再聽看一整張哦所以他的專輯都有整張製作的概念對我覺得是有的啊然後他那個那個HIT SONG我覺得HIT SONG有一點點因為其實我那些戲都沒看過我覺得這叫做因為我沒看過這些戲所以我對這個沒感覺啊你沒有對不會有共鳴嘛也沒有那個記憶啊對啊有些人就是看著聽著命就會想到那個藍陵王然後就想到他們怎麼樣纏綿肥側那你喜歡這些戲的時候這個歌對你來說特別好聽同意就是各種連續劇情</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(26, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(26, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(26, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">2.9s (15.3x RT) • 222 chars</span>
+                    </div>
+                    <div class="transcription-text">呃，黑送就是那个我自己的理解意思就是诶那种黑送就是一种耳啊掉沟啊那种就是耳先把你掉进来然后你再听看一整张哦所以他的专辑都有整张制作的概念对我我觉得是有的啊然后他那个那个黑送我觉得黑送有一点点因为其实我那些戏都没看过我觉得这叫做因为我没看过这些戏所以我对这个没感觉啊啊你没有对不会有共鸣嘛也不会有那个记忆啊对啊有些人就是看着听着命运就会想到那个兰陵王啊然后就想到他们怎么样缠绵悱恻的那你喜欢这些戏的时候这个歌对你说特别好听同意同意就是各种连续剧。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(26, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(26, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(26, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.9s (15.3x RT) • 248 chars</span>
+                    </div>
+                    <div class="transcription-text">呃，hit song就是那种，我自己的理解有一些就是哎那种hit song就是一种耳啊，调高啊这种，就是那种先把你调进来，然后你再听看一整张哦，所以他的专辑都是整张制作的概念，对我我觉得是有的啊，然后他那个那个hit song我觉得hit song有一点点，因为其实我那些戏都没看过，我觉得这叫做因为我没看过这些戏，所以我对这个没感觉啊啊，你没有对啊，有些人就是看着听着命运就会想到那个兰陵王啊，然后就想到他们怎么样缠绵悱恻，那你喜欢这些戏的时候，这个歌对你来说特别好听，同意同意就是各种连续剧。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(26, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(26, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(26, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-27">
+            <div class="sample-header">
+                <div>
+                    <h3>所有关于 WWDC23 预测的终点都是锤子科技</h3>
+                    <div class="sample-meta">少数派播客 • 1232s - 1277s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_dfc9aec1_1232.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.6s (12.6x RT) • 252 chars</span>
+                    </div>
+                    <div class="transcription-text">那更大尺寸的iPad可能是必须要去对 所以传闻中不是也有一款15寸左右的iPad Pro然后另外一个点就是又印证我说的这点12.9它的键盘和触摸板的体验也非常差它触摸板太小了它一定要用那种高强度的去调整窗口大小然后去频繁在不停应用之间去切换这样的操作操作那个触摸板是非常吃力的虽然我们也做一期视频讲过说iPad这套鼠标的就指针的那套逻辑它是做的非常好的但是它完全不影响说这个键盘和触摸板本身体验上很难确实我用iPad做弹交度除非我是在外面我在家里有一段时间就是我把我笔本卖了然后我只用那个iPad去写这样</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(27, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(27, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(27, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">4.1s (10.9x RT) • 305 chars</span>
+                    </div>
+                    <div class="transcription-text">那更大尺寸的 iPad 可能是必须要去的。对，所以传闻中不是也有一款15寸左右的是 iPad Pro 是，然后另外一个点就是就印证我说的这点，就是即使是12.9它的那个键盘和触摸板的体验也非常差。嗯，它触摸板特别小了，抬尿度的那种高强度的去调整窗口大小啊，然后去频繁的不停应用之间去切换，这样的操作那个触摸板是非常吃力的。嗯，对，虽然我们也做一期视频讲过说 iPad 这套鼠标的就指针的这套逻辑它是做的非常好的，对，但是它已完全不影响说它的这个键盘和触摸板本身体验是很，哈哈哈，确实，我我用 iPad 做抬尿度，除非我是在外面，我在家里有一段时间就是我把我笔记本卖了，然后我只用那个 iPad 去洗。哦，这样。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(27, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(27, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(27, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">3.4s (13.2x RT) • 286 chars</span>
+                    </div>
+                    <div class="transcription-text">那更大尺寸的ipad可能是必须要去对，所以传闻中不是也有一款15寸左右的是ipad pro，然后另外一个点就是就印证我说的这点，就是即使是12.9，它的那个键盘和触摸板的体验也非常差，嗯，它触摸板太小了，它调尿度的那种高强度的去调整窗口大小啊，然后去频繁在不停应用之间去切换，这样的操作那个触摸板是非常吃力的，嗯，虽然我们也做一期视频讲过，说ipad这套鼠标的就指针这套逻辑它是做的非常好的，对，但是它已完全不影响说它的这个键盘和触摸板本身体验是很难，确实我我用ipad做台尿度，除非我是在外面，我在家里有一段时间就是我把我笔记本卖了，然后我只用那个ipad去写哦，这样。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(27, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(27, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(27, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-28">
+            <div class="sample-header">
+                <div>
+                    <h3>299. 林生斌事件：什么是人设崩塌？</h3>
+                    <div class="sample-meta">梁文道八分 • 2713s - 2758s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_c1014bcd_2713.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.2s (14.2x RT) • 209 chars</span>
+                    </div>
+                    <div class="transcription-text">今天起来刷题这位朋友我没办法对你说什么鼓励的话我觉得你的想法已经很好现在要做的是自己的事情走自己的路自己决定复读可能家人觉得面子不好看但是这是你的人生你也要知道你考什么成绩其实不能证明你自己是谁能够证明你自己是谁的那个东西远远不是考试一次成绩那么简单如果考试就能证明自己那我们做人就太容易了我也建议你你先好好休息一下,然后从头再来,我不能鼓励你,但是我可以跟你分享一段我的废柴人生,我以前也讲过,我念书的成绩是很糟的,</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(28, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(28, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(28, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">2.9s (15.4x RT) • 227 chars</span>
+                    </div>
+                    <div class="transcription-text">天起来刷题。啊，这位朋友，我没办法对你说什么鼓励的话，我觉得你的想法已经很好，现在要做的是自己的事情，走自己的路，自己决定复读。可能家人觉得面子不好看，但是这是你的人生。呃，你也要知道你考什么成绩，其实不能证明你自己是谁的，能够证明你自己是谁的那个东西，远远不是考试一次成绩那么简单，如果考试就能证明自己，那我们做人就太容易了。我也建议你先好好休息一下，然后从头再来。我不能鼓励你，但是我可以跟你分享一段我的废柴人生。我以前也讲过，我念书的成绩是很糟糕。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(28, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(28, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(28, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.7s (16.8x RT) • 222 chars</span>
+                    </div>
+                    <div class="transcription-text">天起来刷题啊，这位朋友，我没办法对你说什么鼓励的话，我觉得你的想法已经很好，现在要做的是自己的事情，走自己的路，自己决定复读，可能家人觉得面子不好看，但是这是你的人生，呃，你也要知道你考什么成绩其实不能证明你自己是谁的，能够证明你自己是谁的那个东西远远不是考试一次成绩那么简单，如果考试就证明自己，那我们做人就太容易了，我也建议你先好好休息一下，然后从头再来，我不能鼓励你，但是我可以跟你分享一段我的废柴人生，我以前也讲过，我念书的成绩是很糟。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(28, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(28, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(28, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+        <div class="sample" data-type="podcast" id="sample-29">
+            <div class="sample-header">
+                <div>
+                    <h3>敏迪選讀 8/4 台灣關稅開獎、歐盟印度印尼關稅、 泰柬開戰和停火、俄羅斯地震和海嘯、我在台東的學習</h3>
+                    <div class="sample-meta">敏迪選讀 • 5839s - 5884s</div>
+                </div>
+                <span class="sample-type">PODCAST</span>
+            </div>
+            <div class="audio-player">
+                <audio controls preload="none">
+                    <source src="pod_d3edc6f8_5839.mp3" type="audio/mpeg">
+                </audio>
+            </div>
+            <div class="transcriptions">
+
+                <div class="transcription" data-backend="whisper-large-v3">
+                    <div class="transcription-header">
+                        <span class="backend-name">Whisper-Large-V3</span>
+                        <span class="backend-time">3.3s (13.5x RT) • 229 chars</span>
+                    </div>
+                    <div class="transcription-text">那很有趣的是他是一個連連看最後所有的人每一個人不小心都會圍繞某一個主題然後這個主題最後就會勾勒出一個很有機一个很多元的一个蓝图那我们在《长冰》这一场勾勒出什么主题呢其实那时候我就听到有很多的老师来到台东去教书嘛然后呢就刚刚提到有一个老师他是从台北的民生社区教书然后加到教到了台东他就先描述一件事情他说他是英文老师他在台北的时候名声社去教英文的时候那就去教英文嘛他就是很专职的在教英文但他一到了屏东他是先去到屏东的一个部落里面教书他还是英文老师哦可是他就职之后</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(29, 'whisper-large-v3', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(29, 'whisper-large-v3', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(29, 'whisper-large-v3', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="funasr-nano">
+                    <div class="transcription-header">
+                        <span class="backend-name">Fun-ASR-Nano</span>
+                        <span class="backend-time">3.2s (14.1x RT) • 251 chars</span>
+                    </div>
+                    <div class="transcription-text">班纳很有趣的是，他是一个连连看，最后所有的人，每一个人不小心都会围绕某一个主题，然后这个主题最后就会勾勒出一个很很有机的一个很多元的一个蓝图。那我们在强兵这一场勾勒出什么主题呢？其实那时候我就听到有很多的老师来到台东去教书嘛，然后呢就刚刚提到有一个老师，他是从台北的民生社区教书，然后加到教到了台东，他就先描述一件事情，他说他是英文老师，他在台北的时候教英文，民生社区教英文的时候，那就就教英文嘛，他就是很专职的在教英文。但他一到了屏东，他事先去到屏东的一个部落里面教书，他还是英文老师哦，可他就职之后</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(29, 'funasr-nano', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(29, 'funasr-nano', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(29, 'funasr-nano', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+                <div class="transcription" data-backend="glm-asr">
+                    <div class="transcription-header">
+                        <span class="backend-name">GLM-ASR</span>
+                        <span class="backend-time">2.7s (16.5x RT) • 204 chars</span>
+                    </div>
+                    <div class="transcription-text">那很有趣的是，他是一个连连看，最后所有的人每一个人不小心都会围绕某一个主题，然后这个主题最后就会勾勒出一个很很有机的一个很多元的一个蓝图。那我们在强兵这一场勾勒出什么主题呢？其实那时候我就听到有很多的老师来到台东去教书嘛，然后呢就刚刚提到有一个老师，他是从台北的民生社区教英文的时候，那就就就教英文嘛，他就是很专职的在教英文，但他一到了屏东，他是先去到屏东的一个部落里面教书，他还是英文老师哦，可他就职之后。</div>
+                    <div class="rating-buttons">
+                        <button class="rating-btn" onclick="rate(29, 'glm-asr', 'good')">Good</button>
+                        <button class="rating-btn" onclick="rate(29, 'glm-asr', 'ok')">OK</button>
+                        <button class="rating-btn" onclick="rate(29, 'glm-asr', 'poor')">Poor</button>
+                    </div>
+                </div>
+
+            </div>
+        </div>
+
+    </div>
+
+    <h2 class="section-title">Your Ratings Summary</h2>
+    <table class="summary-table">
+        <thead>
+            <tr>
+                <th>Backend</th>
+                <th>Avg Speed</th>
+                <th>Avg Chars</th>
+                <th>Errors</th>
+                <th>Good</th>
+                <th>OK</th>
+                <th>Poor</th>
+            </tr>
+        </thead>
+        <tbody id="summary-body">
+        </tbody>
+    </table>
+
+    <button class="export-btn" onclick="exportRatings()">Export Ratings (JSON)</button>
+
+    <script>
+        const ratings = {};
+        const backends = ["whisper-large-v3", "funasr-nano", "glm-asr"];
+        const backendLabels = {"whisper-large-v3": "Whisper-Large-V3", "funasr-nano": "Fun-ASR-Nano", "glm-asr": "GLM-ASR"};
+        const benchmarkStats = {"whisper-large-v3": {"avg_time": 3.774550112088521, "avg_speed": 12.484254066688841, "avg_chars": 247.13333333333333, "errors": 0, "count": 30}, "funasr-nano": {"avg_time": 4.069536304473877, "avg_speed": 12.235404635357163, "avg_chars": 290.9, "errors": 0, "count": 30}, "glm-asr": {"avg_time": 4.185802268981933, "avg_speed": 14.148431700791003, "avg_chars": 284.53333333333336, "errors": 0, "count": 30}};
+
+        function filterSamples(type) {
+            document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
+            event.target.classList.add('active');
+
+            document.querySelectorAll('.sample').forEach(sample => {
+                if (type === 'all' || sample.dataset.type === type) {
+                    sample.style.display = 'block';
+                } else {
+                    sample.style.display = 'none';
+                }
+            });
+        }
+
+        function rate(sampleId, backend, rating) {
+            const key = `${sampleId}-${backend}`;
+            ratings[key] = rating;
+
+            // Update button styles
+            const btns = document.querySelectorAll(`#sample-${sampleId} [data-backend="${backend}"] .rating-btn`);
+            btns.forEach(btn => {
+                btn.classList.remove('selected', 'poor', 'ok');
+                if (btn.textContent.includes(rating === 'good' ? 'Good' : rating === 'ok' ? 'OK' : 'Poor')) {
+                    btn.classList.add('selected');
+                    if (rating === 'poor') btn.classList.add('poor');
+                    if (rating === 'ok') btn.classList.add('ok');
+                }
+            });
+
+            updateSummary();
+        }
+
+        function updateSummary() {
+            const counts = {};
+            backends.forEach(b => {
+                counts[b] = { good: 0, ok: 0, poor: 0 };
+            });
+
+            Object.entries(ratings).forEach(([key, rating]) => {
+                const backend = key.split('-').slice(1).join('-');
+                if (counts[backend]) {
+                    counts[backend][rating]++;
+                }
+            });
+
+            const tbody = document.getElementById('summary-body');
+            tbody.innerHTML = backends.map(b => {
+                const stats = benchmarkStats[b] || {};
+                const avgSpeed = stats.avg_speed ? stats.avg_speed.toFixed(1) + 'x' : '-';
+                const avgChars = stats.avg_chars ? Math.round(stats.avg_chars) : '-';
+                const errors = stats.errors !== undefined ? stats.errors : '-';
+                return `
+                <tr>
+                    <td>${backendLabels[b] || b}</td>
+                    <td>${avgSpeed}</td>
+                    <td>${avgChars}</td>
+                    <td>${errors}</td>
+                    <td>${counts[b].good}</td>
+                    <td>${counts[b].ok}</td>
+                    <td>${counts[b].poor}</td>
+                </tr>
+            `}).join('');
+        }
+
+        function exportRatings() {
+            const data = JSON.stringify({ratings, benchmarkStats}, null, 2);
+            const blob = new Blob([data], { type: 'application/json' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'asr_ratings.json';
+            a.click();
+        }
+
+        // Initial summary
+        updateSummary();
+    </script>
+</body>
+</html>
