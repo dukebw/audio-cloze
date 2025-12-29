@@ -1397,13 +1397,19 @@ def cmd_mine(args):
     output_dir = Path(args.output)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    all_clips = []
+    # Load existing clips to merge with new ones
+    existing_clips = load_existing_clips(output_dir)
+    log.info(f"Loaded {len(existing_clips)} existing clips")
 
+    new_clips = []
     for word in args.words:
         clips = process_word_from_index(conn, word, output_dir, max_clips=args.num_clips)
-        all_clips.extend(clips)
+        new_clips.extend(clips)
 
     conn.close()
+
+    # Merge new clips with existing ones
+    all_clips = merge_clips(existing_clips, new_clips)
 
     if all_clips:
         html_path = generate_html_review(all_clips, output_dir)
@@ -1412,7 +1418,8 @@ def cmd_mine(args):
         print(f"\n{'='*60}")
         print(f"COMPLETE!")
         print(f"{'='*60}")
-        print(f"Clips generated: {len(all_clips)}")
+        print(f"New clips: {len(new_clips)}")
+        print(f"Total clips: {len(all_clips)}")
         print(f"HTML review: {html_path}")
         print(f"Metadata: {metadata_path}")
     else:
@@ -1533,30 +1540,48 @@ def cmd_stats(args):
     conn.close()
 
 
+def cmd_review(args):
+    """REVIEW command: Regenerate review.html from existing clips."""
+    output_dir = Path(args.output)
+
+    if not output_dir.exists():
+        log.error(f"Output directory not found: {output_dir}")
+        return
+
+    clips = load_existing_clips(output_dir)
+
+    if not clips:
+        log.error(f"No clips.json found in {output_dir}")
+        return
+
+    html_path = generate_html_review(clips, output_dir)
+
+    print(f"\n{'='*60}")
+    print(f"REVIEW HTML REGENERATED")
+    print(f"{'='*60}")
+    print(f"Total clips: {len(clips)}")
+    print(f"HTML review: {html_path}")
+
+
 # =============================================================================
 # HTML Review Generator
 # =============================================================================
 
-def generate_html_review(clips: list[AudioClip], output_dir: Path) -> Path:
-    """Generate an HTML page for reviewing clips with audio players."""
+def generate_html_review(clips: list[dict], output_dir: Path) -> Path:
+    """Generate an HTML page for reviewing clips with audio players.
+
+    Args:
+        clips: List of clip dictionaries (from clips.json format)
+        output_dir: Directory to write review.html
+    """
     html_path = output_dir / "review.html"
 
+    # Add 'id' field if not present
     clips_json_data = []
     for clip in clips:
-        clips_json_data.append({
-            'id': f"{clip.word}_{clip.video_id}",
-            'word': clip.word,
-            'video_id': clip.video_id,
-            'video_title': clip.video_title,
-            'transcript': clip.transcript,
-            'audio_full': clip.audio_full_path.name,
-            'audio_cloze': clip.audio_cloze_path.name,
-            'word_start': clip.word_start,
-            'word_end': clip.word_end,
-            'source_url': clip.source_url,
-            'source_type': clip.source_type,
-            'timing_confidence': clip.timing_confidence,
-        })
+        clip_data = dict(clip)
+        clip_data['id'] = f"{clip['word']}_{clip['video_id']}"
+        clips_json_data.append(clip_data)
 
     clips_json_str = json.dumps(clips_json_data, ensure_ascii=False)
 
@@ -1672,20 +1697,32 @@ def generate_html_review(clips: list[AudioClip], output_dir: Path) -> Path:
   </div>
 '''
 
-    current_word = None
-    for clip in clips:
-        clip_id = f"{clip.word}_{clip.video_id}"
+    # Sort clips by word for grouping
+    sorted_clips = sorted(clips, key=lambda c: c['word'])
 
-        if clip.word != current_word:
+    current_word = None
+    for clip in sorted_clips:
+        word = clip['word']
+        video_id = clip['video_id']
+        clip_id = f"{word}_{video_id}"
+
+        if word != current_word:
             if current_word is not None:
                 html_content += '  </div>\n'
-            current_word = clip.word
-            html_content += f'  <div class="word-section">\n    <h2>{clip.word}</h2>\n'
+            current_word = word
+            html_content += f'  <div class="word-section">\n    <h2>{word}</h2>\n'
 
         # Highlight target word
-        highlighted = clip.transcript
-        for variant in get_word_variants(clip.word):
-            highlighted = highlighted.replace(variant, f'<span class="highlight">{clip.word}</span>')
+        highlighted = clip['transcript']
+        for variant in get_word_variants(word):
+            highlighted = highlighted.replace(variant, f'<span class="highlight">{word}</span>')
+
+        audio_full = clip['audio_full']
+        audio_cloze = clip['audio_cloze']
+        source_url = clip['source_url']
+        video_title = clip['video_title'][:60]
+        word_start = clip['word_start']
+        word_end = clip['word_end']
 
         html_content += f'''    <div class="clip-card" id="card-{clip_id}" data-clip-id="{clip_id}">
       <div class="approval-buttons">
@@ -1695,17 +1732,17 @@ def generate_html_review(clips: list[AudioClip], output_dir: Path) -> Path:
       <div class="audio-row">
         <div class="audio-item">
           <label>Full Audio</label>
-          <audio controls src="{clip.audio_full_path.name}"></audio>
+          <audio controls src="{audio_full}"></audio>
         </div>
         <div class="audio-item">
           <label>Cloze Audio (word silenced)</label>
-          <audio controls src="{clip.audio_cloze_path.name}"></audio>
+          <audio controls src="{audio_cloze}"></audio>
         </div>
       </div>
       <p class="transcript">{highlighted}</p>
       <p class="meta">
-        Source: <a href="{clip.source_url}" target="_blank">{clip.video_title[:60]}...</a>
-        <span class="timing"> | Word at {clip.word_start:.2f}s - {clip.word_end:.2f}s</span>
+        Source: <a href="{source_url}" target="_blank">{video_title}...</a>
+        <span class="timing"> | Word at {word_start:.2f}s - {word_end:.2f}s</span>
       </p>
     </div>
 '''
@@ -1794,26 +1831,56 @@ def generate_html_review(clips: list[AudioClip], output_dir: Path) -> Path:
     return html_path
 
 
-def save_clips_metadata(clips: list[AudioClip], output_dir: Path) -> Path:
+def load_existing_clips(output_dir: Path) -> list[dict]:
+    """Load existing clips from clips.json if it exists."""
+    metadata_path = output_dir / "clips.json"
+    if metadata_path.exists():
+        try:
+            with open(metadata_path, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, IOError):
+            return []
+    return []
+
+
+def clip_to_dict(clip: AudioClip) -> dict:
+    """Convert AudioClip to dictionary for JSON serialization."""
+    return {
+        'word': clip.word,
+        'video_id': clip.video_id,
+        'video_title': clip.video_title,
+        'transcript': clip.transcript,
+        'audio_full': clip.audio_full_path.name,
+        'audio_cloze': clip.audio_cloze_path.name,
+        'word_start': clip.word_start,
+        'word_end': clip.word_end,
+        'source_url': clip.source_url,
+        'source_type': clip.source_type,
+        'timing_confidence': clip.timing_confidence,
+    }
+
+
+def merge_clips(existing: list[dict], new_clips: list[AudioClip]) -> list[dict]:
+    """Merge new clips with existing ones, avoiding duplicates."""
+    # Create a set of existing clip IDs (word + video_id)
+    existing_ids = {(c['word'], c['video_id']) for c in existing}
+
+    merged = list(existing)
+    for clip in new_clips:
+        clip_id = (clip.word, clip.video_id)
+        if clip_id not in existing_ids:
+            merged.append(clip_to_dict(clip))
+            existing_ids.add(clip_id)
+
+    return merged
+
+
+def save_clips_metadata(clips: list[dict], output_dir: Path) -> Path:
     """Save clip metadata as JSON."""
     metadata_path = output_dir / "clips.json"
 
-    data = []
-    for clip in clips:
-        data.append({
-            'word': clip.word,
-            'video_id': clip.video_id,
-            'video_title': clip.video_title,
-            'transcript': clip.transcript,
-            'audio_full': clip.audio_full_path.name,
-            'audio_cloze': clip.audio_cloze_path.name,
-            'word_start': clip.word_start,
-            'word_end': clip.word_end,
-            'source_url': clip.source_url,
-        })
-
     with open(metadata_path, 'w', encoding='utf-8') as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+        json.dump(clips, f, ensure_ascii=False, indent=2)
 
     return metadata_path
 
@@ -1868,6 +1935,10 @@ Examples:
     stats_parser.add_argument('--db', default='vocab.db', help='Database path')
     stats_parser.add_argument('--test', dest='test_word', help='Test search for a word')
 
+    # REVIEW command
+    review_parser = subparsers.add_parser('review', help='Regenerate review.html from existing clips')
+    review_parser.add_argument('-o', '--output', default='./audio_clips', help='Output directory with clips.json')
+
     args = parser.parse_args()
 
     if args.command == 'index':
@@ -1876,6 +1947,8 @@ Examples:
         cmd_mine(args)
     elif args.command == 'stats':
         cmd_stats(args)
+    elif args.command == 'review':
+        cmd_review(args)
     else:
         parser.print_help()
 
