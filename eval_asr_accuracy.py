@@ -111,6 +111,37 @@ def resolve_audio_path(audio_path: str, audio_dir: Path) -> Path:
     return audio_dir / path.name
 
 
+def ensure_sample_audio(sample: Sample, audio_path: Path,
+                        conn: Optional[sqlite3.Connection]) -> bool:
+    """Re-download missing audio for an existing sample."""
+    if audio_path.exists():
+        return True
+
+    if sample.source_type == "youtube":
+        print(f"  Re-downloading YouTube audio: {audio_path.name}")
+        return download_youtube_sample(
+            sample.source_id, sample.start_time, sample.duration, audio_path
+        )
+
+    if sample.source_type == "podcast":
+        if conn is None:
+            print("  Missing database connection; cannot re-download podcast audio")
+            return False
+        row = conn.execute(
+            "SELECT audio_url FROM episodes WHERE episode_id = ?",
+            (sample.source_id,)
+        ).fetchone()
+        if not row or not row[0]:
+            print(f"  Missing audio URL for episode {sample.source_id[:8]}")
+            return False
+        print(f"  Re-downloading podcast audio: {audio_path.name}")
+        return download_podcast_sample(
+            row[0], sample.start_time, sample.duration, audio_path
+        )
+
+    return False
+
+
 def get_random_youtube_samples(conn: sqlite3.Connection, n: int) -> list[dict]:
     """Get random YouTube video samples."""
     query = """
@@ -935,26 +966,31 @@ def main():
     if existing_results:
         print(f"\nReusing {len(existing_results)} existing samples from {RESULTS_FILE}...")
         results = existing_results
+        db_path = Path(__file__).parent / "vocab.db"
+        conn = sqlite3.connect(str(db_path)) if db_path.exists() else None
+        if conn is None:
+            print("WARNING: Database not found; podcast audio cannot be re-downloaded.")
         for i, result in enumerate(results):
             sample = result.sample
             audio_path = resolve_audio_path(sample.audio_path, audio_dir)
-            if audio_path.exists():
-                try:
-                    rel_path = audio_path.relative_to(EVAL_DIR)
-                    if sample.audio_path != str(rel_path):
-                        sample.audio_path = str(rel_path)
-                except ValueError:
-                    pass
             print(f"\n[{i+1}/{len(results)}] {sample.title[:50]}...")
-            if not audio_path.exists():
+            if not ensure_sample_audio(sample, audio_path, conn):
                 print(f"  Missing audio: {audio_path.name} (skipping)")
                 continue
+            try:
+                rel_path = audio_path.relative_to(EVAL_DIR)
+                if sample.audio_path != str(rel_path):
+                    sample.audio_path = str(rel_path)
+            except ValueError:
+                pass
             result.transcriptions = run_transcriptions(
                 audio_path,
                 backend_specs,
                 existing=result.transcriptions,
                 audio_duration=sample.duration
             )
+        if conn is not None:
+            conn.close()
     else:
         # Connect to database
         db_path = Path(__file__).parent / "vocab.db"
