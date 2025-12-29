@@ -1,0 +1,50 @@
+# Audio-Cloze Sources Configuration
+# Format: TYPE URL NAME
+# Types: youtube, podcast, wenetspeech
+
+# =============================================================================
+# YouTube Channels (existing)
+# =============================================================================
+youtube https://www.youtube.com/@rayduenglish 阿滴英文
+youtube https://www.youtube.com/@shasha77 志祺七七
+youtube https://www.youtube.com/channel/UCuHHKbwC0TWjeqxbqdO-N_g 泛科學PanSci
+youtube https://www.youtube.com/@TVBSNEWS01 TVBS新聞
+
+# =============================================================================
+# Taiwan Podcasts (high oral density - chat, news, current events)
+# =============================================================================
+podcast https://feeds.buzzsprout.com/1974862.rss 百靈果News
+podcast https://feeds.soundon.fm/podcasts/44833083-490d-4f97-a782-fd5e34c0abef.xml 敏迪選讀
+podcast https://anchor.fm/s/1ea77470/podcast/rss 台灣通勤第一品牌
+
+# =============================================================================
+# Mainland/Pan-Chinese (long interviews, narrative, culture)
+# =============================================================================
+podcast https://feeds.storyfm.cn/storyfm.xml 故事FM
+podcast https://justpodmedia.com/rss/left-right.xml 忽左忽右
+podcast https://anchor.fm/s/2389ed24/podcast/rss 日谈公园
+podcast http://www.stovol.club/rss 随机波动
+podcast https://api.vistopia.com.cn/rss/program/11.xml 梁文道八分
+
+# =============================================================================
+# Lifestyle/Chat (everyday nouns, brands, products)
+# =============================================================================
+podcast https://feeds.acast.com/public/shows/mostlyharmless 基本无害
+podcast http://www.ximalaya.com/album/3558668.xml 黑水公园
+podcast https://feeds.danlirencomedy.com/xxlth.xml 谐星聊天会
+
+# =============================================================================
+# Tech/Culture (different registers)
+# =============================================================================
+podcast https://sspai.typlog.io/feed/audio.xml 少数派播客
+podcast https://tiaodao.typlog.io/feed/audio.xml 跳岛FM
+
+# =============================================================================
+# Morning/Info (clear speech, stable rhythm)
+# =============================================================================
+podcast https://feeds.fireside.fm/sunshine/rss 放晴早安
+
+# =============================================================================
+# External Corpora (local paths - uncomment when available)
+# =============================================================================
+# wenetspeech /data/wenetspeech/manifest.json WenetSpeech

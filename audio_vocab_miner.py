@@ -42,6 +42,12 @@ _t2s = OpenCC('t2s')
 # VTT parsing
 import webvtt
 
+# RSS feed parsing
+import feedparser
+import hashlib
+import html
+import requests
+
 
 # =============================================================================
 # Database Schema
@@ -74,15 +80,96 @@ CREATE TABLE IF NOT EXISTS channels (
     channel_url TEXT,
     channel_name TEXT,
     last_crawled TEXT,
-    video_count INTEGER DEFAULT 0
+    video_count INTEGER DEFAULT 0,
+    source_type TEXT DEFAULT 'youtube'
 );
+
+-- Podcast episodes table
+CREATE TABLE IF NOT EXISTS episodes (
+    episode_id TEXT PRIMARY KEY,
+    feed_url TEXT,
+    channel_name TEXT,
+    title TEXT,
+    description TEXT,
+    pub_date TEXT,
+    audio_url TEXT,
+    duration REAL,
+    transcribed INTEGER DEFAULT 0,
+    indexed_at TEXT
+);
+
+-- Episode show notes FTS for Phase 1 text search
+CREATE VIRTUAL TABLE IF NOT EXISTS episode_notes USING fts5(
+    episode_id,
+    channel,
+    text,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- WenetSpeech pre-transcribed segments
+CREATE TABLE IF NOT EXISTS wenetspeech_segments (
+    segment_id TEXT PRIMARY KEY,
+    audio_path TEXT,
+    start_time REAL,
+    end_time REAL,
+    text TEXT,
+    speaker_id TEXT,
+    confidence REAL,
+    domain TEXT
+);
+
+-- WenetSpeech FTS index
+CREATE VIRTUAL TABLE IF NOT EXISTS wenetspeech_fts USING fts5(
+    segment_id,
+    text,
+    tokenize='unicode61 remove_diacritics 2'
+);
+
+-- Podcast caption segments (from ASR Phase 2)
+CREATE TABLE IF NOT EXISTS podcast_captions (
+    caption_id INTEGER PRIMARY KEY AUTOINCREMENT,
+    episode_id TEXT,
+    start_time REAL,
+    end_time REAL,
+    text TEXT,
+    confidence REAL,
+    FOREIGN KEY (episode_id) REFERENCES episodes(episode_id)
+);
+
+-- Podcast captions FTS index
+CREATE VIRTUAL TABLE IF NOT EXISTS podcast_captions_fts USING fts5(
+    caption_id,
+    episode_id,
+    text,
+    tokenize='unicode61 remove_diacritics 2'
+);
+"""
+
+# Migration for existing databases
+MIGRATIONS = """
+-- Add source_type to channels if not exists
+ALTER TABLE channels ADD COLUMN source_type TEXT DEFAULT 'youtube';
 """
 
 
 def init_database(db_path: Path) -> sqlite3.Connection:
-    """Initialize database with schema."""
+    """Initialize database with schema and apply migrations."""
     conn = sqlite3.connect(str(db_path))
+
+    # Create tables (IF NOT EXISTS handles existing tables)
     conn.executescript(SCHEMA)
+
+    # Apply migrations for existing databases
+    try:
+        # Check if source_type column exists in channels
+        cursor = conn.execute("PRAGMA table_info(channels)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'source_type' not in columns:
+            conn.execute("ALTER TABLE channels ADD COLUMN source_type TEXT DEFAULT 'youtube'")
+            log.info("Applied migration: added source_type to channels")
+    except sqlite3.OperationalError:
+        pass  # Table might not exist yet
+
     conn.commit()
     return conn
 
@@ -311,68 +398,514 @@ def crawl_channel(conn: sqlite3.Connection, channel_url: str, channel_name: str,
     return indexed
 
 
+# =============================================================================
+# RSS Feed Indexer (Podcast Support)
+# =============================================================================
+
+def strip_html_tags(text: str) -> str:
+    """Remove HTML tags from text and decode entities."""
+    # Decode HTML entities
+    text = html.unescape(text)
+    # Remove HTML tags
+    clean = re.sub(r'<[^>]+>', ' ', text)
+    # Normalize whitespace
+    clean = re.sub(r'\s+', ' ', clean).strip()
+    return clean
+
+
+def generate_episode_id(feed_url: str, episode_guid: str) -> str:
+    """Generate a stable episode ID from feed URL and GUID."""
+    combined = f"{feed_url}:{episode_guid}"
+    return hashlib.sha256(combined.encode()).hexdigest()[:16]
+
+
+def get_audio_enclosure(entry: dict) -> Optional[str]:
+    """Extract audio URL from RSS enclosure."""
+    # Check enclosures first
+    for enclosure in entry.get('enclosures', []):
+        if enclosure.get('type', '').startswith('audio/'):
+            return enclosure.get('href')
+    # Fallback: check links
+    for link in entry.get('links', []):
+        if link.get('type', '').startswith('audio/'):
+            return link.get('href')
+    return None
+
+
+def parse_duration(entry: dict) -> float:
+    """Parse episode duration from iTunes duration tag or similar."""
+    duration_str = entry.get('itunes_duration', '')
+    if not duration_str:
+        return 0.0
+
+    # Handle formats: "HH:MM:SS", "MM:SS", or seconds
+    parts = str(duration_str).split(':')
+    try:
+        if len(parts) == 3:
+            return int(parts[0]) * 3600 + int(parts[1]) * 60 + float(parts[2])
+        elif len(parts) == 2:
+            return int(parts[0]) * 60 + float(parts[1])
+        else:
+            return float(duration_str)
+    except (ValueError, TypeError):
+        return 0.0
+
+
+def is_episode_indexed(conn: sqlite3.Connection, episode_id: str) -> bool:
+    """Check if episode is already in database."""
+    result = conn.execute(
+        "SELECT 1 FROM episodes WHERE episode_id = ?", (episode_id,)
+    ).fetchone()
+    return result is not None
+
+
+def crawl_podcast_feed(conn: sqlite3.Connection, feed_url: str,
+                       channel_name: str, limit: int = 100) -> int:
+    """Crawl a podcast RSS feed and index episode show notes.
+
+    Phase 1 indexing: Only indexes show notes text for fast searching.
+    ASR transcription (Phase 2) happens on-demand during mining.
+    """
+    log.info(f"Fetching RSS feed: {feed_url}")
+
+    try:
+        feed = feedparser.parse(feed_url)
+    except Exception as e:
+        log.error(f"Failed to parse feed: {e}")
+        return 0
+
+    if feed.bozo and not feed.entries:
+        log.error(f"Invalid feed: {feed.bozo_exception}")
+        return 0
+
+    indexed = 0
+    skipped = 0
+
+    for entry in feed.entries[:limit]:
+        # Generate stable episode ID
+        episode_guid = entry.get('id', entry.get('link', entry.get('title', '')))
+        episode_id = generate_episode_id(feed_url, episode_guid)
+
+        if is_episode_indexed(conn, episode_id):
+            skipped += 1
+            continue
+
+        # Extract episode metadata
+        title = entry.get('title', 'Untitled')
+        description = entry.get('description', entry.get('summary', ''))
+        pub_date = entry.get('published', '')
+        audio_url = get_audio_enclosure(entry)
+        duration = parse_duration(entry)
+
+        if not description:
+            log.debug(f"  Skipping {title[:30]}... (no description)")
+            continue
+
+        # Clean show notes
+        clean_description = strip_html_tags(description)
+
+        # Check if description has Chinese characters (filter out English-only)
+        has_chinese = bool(re.search(r'[\u4e00-\u9fff]', clean_description))
+        if not has_chinese:
+            log.debug(f"  Skipping {title[:30]}... (no Chinese)")
+            continue
+
+        # Insert episode metadata
+        conn.execute("""
+            INSERT INTO episodes
+            (episode_id, feed_url, channel_name, title, description,
+             pub_date, audio_url, duration, transcribed, indexed_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0, ?)
+        """, (episode_id, feed_url, channel_name, title, clean_description,
+              pub_date, audio_url, duration, datetime.now().isoformat()))
+
+        # Index show notes in FTS table
+        conn.execute("""
+            INSERT INTO episode_notes (episode_id, channel, text)
+            VALUES (?, ?, ?)
+        """, (episode_id, channel_name, clean_description))
+
+        indexed += 1
+        if indexed % 10 == 0:
+            log.info(f"  Indexed {indexed} episodes...")
+
+    conn.commit()
+
+    # Update channel record
+    conn.execute("""
+        INSERT OR REPLACE INTO channels
+        (channel_id, channel_url, channel_name, last_crawled, video_count, source_type)
+        VALUES (?, ?, ?, ?, ?, 'podcast')
+    """, (channel_name, feed_url, channel_name, datetime.now().isoformat(), indexed))
+    conn.commit()
+
+    log.info(f"Podcast complete: {indexed} episodes indexed, {skipped} already indexed")
+    return indexed
+
+
+# =============================================================================
+# WenetSpeech Corpus Indexer
+# =============================================================================
+
+def index_wenetspeech_corpus(conn: sqlite3.Connection, manifest_path: Path,
+                              corpus_name: str, limit: int = 100000) -> int:
+    """Index WenetSpeech corpus from manifest file.
+
+    WenetSpeech provides pre-transcribed segments with verified timing.
+    Manifest format expected: JSON with 'segments' array.
+    """
+    log.info(f"Indexing WenetSpeech corpus: {manifest_path}")
+
+    if not manifest_path.exists():
+        log.warning(f"WenetSpeech manifest not found: {manifest_path}")
+        log.info("Skipping WenetSpeech indexing - download corpus first")
+        return 0
+
+    try:
+        with open(manifest_path) as f:
+            manifest = json.load(f)
+    except Exception as e:
+        log.error(f"Failed to load manifest: {e}")
+        return 0
+
+    segments = manifest.get('segments', manifest.get('data', []))
+    if not segments:
+        log.warning("No segments found in manifest")
+        return 0
+
+    indexed = 0
+
+    for segment in segments[:limit]:
+        segment_id = segment.get('id', segment.get('segment_id', str(indexed)))
+
+        # Check if already indexed
+        existing = conn.execute(
+            "SELECT 1 FROM wenetspeech_segments WHERE segment_id = ?",
+            (segment_id,)
+        ).fetchone()
+        if existing:
+            continue
+
+        audio_path = segment.get('audio_path', segment.get('audio', ''))
+        text = segment.get('text', segment.get('transcript', ''))
+
+        if not text:
+            continue
+
+        # Insert segment
+        conn.execute("""
+            INSERT INTO wenetspeech_segments
+            (segment_id, audio_path, start_time, end_time, text,
+             speaker_id, confidence, domain)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        """, (
+            segment_id,
+            audio_path,
+            segment.get('start', segment.get('start_time', 0)),
+            segment.get('end', segment.get('end_time', 0)),
+            text,
+            segment.get('speaker', segment.get('speaker_id', '')),
+            segment.get('confidence', 1.0),
+            segment.get('domain', corpus_name)
+        ))
+
+        # Index in FTS
+        conn.execute("""
+            INSERT INTO wenetspeech_fts (segment_id, text)
+            VALUES (?, ?)
+        """, (segment_id, text))
+
+        indexed += 1
+        if indexed % 10000 == 0:
+            conn.commit()
+            log.info(f"  Indexed {indexed} segments...")
+
+    conn.commit()
+    log.info(f"WenetSpeech complete: {indexed} segments indexed")
+    return indexed
+
+
+# =============================================================================
+# ASR Localizer (Whisper large-v3 for Podcast Timing)
+# =============================================================================
+
+# Lazy load whisper to avoid import overhead when not needed
+_whisper_model = None
+
+def get_whisper_model():
+    """Get or load the Whisper large-v3 model (lazy loading)."""
+    global _whisper_model
+    if _whisper_model is None:
+        try:
+            import whisper
+            log.info("Loading Whisper large-v3 model (this may take a moment)...")
+            _whisper_model = whisper.load_model("large-v3")
+            log.info("Whisper model loaded successfully")
+        except ImportError:
+            log.error("Whisper not installed. Run: pip install openai-whisper")
+            return None
+    return _whisper_model
+
+
+def download_podcast_audio(audio_url: str, output_path: Path,
+                           start_time: float = None, end_time: float = None) -> bool:
+    """Download podcast audio, optionally with time range.
+
+    If start_time and end_time are provided, downloads only that segment.
+    """
+    try:
+        if start_time is not None and end_time is not None:
+            # Use yt-dlp for time-range downloads (works with many podcast CDNs)
+            cmd = [
+                "yt-dlp",
+                "-x", "--audio-format", "mp3",
+                "--download-sections", f"*{start_time}-{end_time}",
+                "-o", str(output_path),
+                audio_url
+            ]
+            result = run_command(cmd)
+            if result.returncode == 0 and output_path.exists():
+                return True
+
+        # Fallback: download full file with requests
+        log.info(f"  Downloading audio from {audio_url[:50]}...")
+        response = requests.get(audio_url, stream=True, timeout=60)
+        response.raise_for_status()
+
+        with open(output_path, 'wb') as f:
+            for chunk in response.iter_content(chunk_size=8192):
+                f.write(chunk)
+
+        return output_path.exists()
+
+    except Exception as e:
+        log.error(f"Failed to download audio: {e}")
+        return False
+
+
+def localize_word_with_asr(audio_path: Path, word: str) -> list[dict]:
+    """Use Whisper large-v3 to find precise word timing in audio.
+
+    Returns list of occurrences with:
+    - start: start time in seconds
+    - end: end time in seconds
+    - text: surrounding segment text
+    - confidence: word probability
+    """
+    model = get_whisper_model()
+    if model is None:
+        return []
+
+    log.info(f"  Running Whisper ASR on {audio_path.name}...")
+
+    try:
+        result = model.transcribe(
+            str(audio_path),
+            language="zh",
+            word_timestamps=True,
+        )
+    except Exception as e:
+        log.error(f"Whisper transcription failed: {e}")
+        return []
+
+    # Get word variants (simplified/traditional)
+    variants = get_word_variants(word)
+    occurrences = []
+
+    for segment in result.get('segments', []):
+        words = segment.get('words', [])
+
+        for i, word_info in enumerate(words):
+            word_text = word_info.get('word', '').strip()
+
+            # Check if any variant appears in this word or surrounding context
+            found_variant = None
+            for variant in variants:
+                if variant in word_text:
+                    found_variant = variant
+                    break
+                # Check surrounding words for multi-character matches
+                context = ''.join(w.get('word', '') for w in words[max(0, i-2):i+3])
+                if variant in context:
+                    found_variant = variant
+                    break
+
+            if found_variant:
+                occurrences.append({
+                    'start': word_info.get('start', 0),
+                    'end': word_info.get('end', 0),
+                    'text': segment.get('text', ''),
+                    'confidence': word_info.get('probability', 0.5),
+                    'found_variant': found_variant,
+                })
+
+    log.info(f"  ASR found {len(occurrences)} occurrences of '{word}'")
+    return occurrences
+
+
+def smart_asr_localize(audio_url: str, word: str, duration: float,
+                        temp_dir: Path) -> list[dict]:
+    """Smart ASR: chunk long episodes to avoid full transcription.
+
+    For short episodes (<15 min): transcribe full audio
+    For long episodes: process in 5-minute chunks, stop when found
+    """
+    if duration <= 0:
+        duration = 3600  # Assume 1 hour if unknown
+
+    # Short episodes: transcribe full
+    if duration < 900:  # 15 minutes
+        audio_path = temp_dir / "podcast_full.mp3"
+        if download_podcast_audio(audio_url, audio_path):
+            return localize_word_with_asr(audio_path, word)
+        return []
+
+    # Long episodes: chunk-based search
+    chunk_duration = 300  # 5-minute chunks
+    all_occurrences = []
+
+    for chunk_idx, chunk_start in enumerate(range(0, int(duration), chunk_duration)):
+        chunk_end = min(chunk_start + chunk_duration, duration)
+        chunk_path = temp_dir / f"chunk_{chunk_idx}.mp3"
+
+        log.info(f"  Processing chunk {chunk_idx+1}: {chunk_start/60:.1f}-{chunk_end/60:.1f} min")
+
+        # Try to download just the chunk
+        if not download_podcast_audio(audio_url, chunk_path, chunk_start, chunk_end):
+            continue
+
+        occurrences = localize_word_with_asr(chunk_path, word)
+
+        # Adjust timing to absolute position
+        for occ in occurrences:
+            occ['start'] += chunk_start
+            occ['end'] += chunk_start
+        all_occurrences.extend(occurrences)
+
+        # Clean up chunk
+        chunk_path.unlink(missing_ok=True)
+
+        # Early exit if we have enough hits
+        if len(all_occurrences) >= 3:
+            log.info(f"  Found enough occurrences, stopping chunk processing")
+            break
+
+    return all_occurrences
+
+
+# =============================================================================
+# Sources File Parser
+# =============================================================================
+
+def parse_sources_file(path: Path) -> list[dict]:
+    """Parse multi-source configuration file.
+
+    Supports formats:
+    - Legacy: URL NAME (assumes YouTube)
+    - New: TYPE URL NAME (youtube/podcast/wenetspeech)
+
+    Examples:
+        youtube https://www.youtube.com/@shasha77 志祺七七
+        podcast https://feeds.buzzsprout.com/1974862.rss 百靈果News
+        wenetspeech /data/wenetspeech/manifest.json WenetSpeech
+    """
+    sources = []
+    with open(path) as f:
+        for line in f:
+            line = line.strip()
+            if not line or line.startswith('#'):
+                continue
+
+            parts = line.split(None, 2)
+            if len(parts) < 2:
+                continue
+
+            # Check if first part is a source type
+            if parts[0] in ('youtube', 'podcast', 'wenetspeech'):
+                sources.append({
+                    'type': parts[0],
+                    'url': parts[1],
+                    'name': parts[2] if len(parts) > 2 else parts[1].split('/')[-1]
+                })
+            else:
+                # Legacy format: URL NAME (assume YouTube)
+                sources.append({
+                    'type': 'youtube',
+                    'url': parts[0],
+                    'name': parts[1] if len(parts) > 1 else parts[0].split('@')[-1].split('/')[0]
+                })
+
+    return sources
+
+
 def cmd_index(args):
-    """INDEX command: Crawl channels and build subtitle index."""
+    """INDEX command: Crawl sources and build subtitle index."""
     db_path = Path(args.db)
     conn = init_database(db_path)
 
-    # Read channels from file or use defaults
-    if args.channels:
-        channels_file = Path(args.channels)
-        if channels_file.exists():
-            with open(channels_file) as f:
-                channels = []
-                for line in f:
-                    line = line.strip()
-                    if line and not line.startswith('#'):
-                        # Format: URL or "URL NAME"
-                        parts = line.split(None, 1)
-                        url = parts[0]
-                        name = parts[1] if len(parts) > 1 else url.split('@')[-1].split('/')[0]
-                        channels.append((url, name))
-        else:
-            log.error(f"Channels file not found: {channels_file}")
-            return
+    # Parse sources file (supports new multi-source format and legacy channels.txt)
+    sources_file = Path(args.sources) if hasattr(args, 'sources') and args.sources else None
+    channels_file = Path(args.channels) if args.channels else None
+
+    sources = []
+    if sources_file and sources_file.exists():
+        sources = parse_sources_file(sources_file)
+    elif channels_file and channels_file.exists():
+        sources = parse_sources_file(channels_file)
     else:
-        # Default channels
-        channels = [
-            ("https://www.youtube.com/@TVBSNEWS01", "TVBS新聞"),
-            ("https://www.youtube.com/@newsebc", "東森新聞"),
-            ("https://www.youtube.com/@setmoney", "三立新聞"),
+        # Default YouTube channels
+        sources = [
+            {'type': 'youtube', 'url': "https://www.youtube.com/@TVBSNEWS01", 'name': "TVBS新聞"},
+            {'type': 'youtube', 'url': "https://www.youtube.com/@newsebc", 'name': "東森新聞"},
+            {'type': 'youtube', 'url': "https://www.youtube.com/@setmoney", 'name': "三立新聞"},
         ]
+
+    # Filter by source type if specified
+    source_type_filter = getattr(args, 'type', 'all')
+    if source_type_filter != 'all':
+        sources = [s for s in sources if s['type'] == source_type_filter]
 
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         total_indexed = 0
 
-        for channel_url, channel_name in channels:
+        for source in sources:
+            source_type = source['type']
+            source_url = source['url']
+            source_name = source['name']
+
             log.info(f"\n{'='*60}")
-            log.info(f"Crawling: {channel_name}")
+            log.info(f"[{source_type.upper()}] Crawling: {source_name}")
             log.info(f"{'='*60}")
 
-            indexed = crawl_channel(conn, channel_url, channel_name, temp_path, limit=args.limit)
-            total_indexed += indexed
+            if source_type == 'youtube':
+                indexed = crawl_channel(conn, source_url, source_name, temp_path, limit=args.limit)
+                total_indexed += indexed
+            elif source_type == 'podcast':
+                indexed = crawl_podcast_feed(conn, source_url, source_name, limit=args.limit)
+                total_indexed += indexed
+            elif source_type == 'wenetspeech':
+                indexed = index_wenetspeech_corpus(conn, Path(source_url), source_name, limit=args.limit)
+                total_indexed += indexed
+            else:
+                log.warning(f"Unknown source type: {source_type}")
 
-    log.info(f"\nTotal indexed: {total_indexed} videos")
+    log.info(f"\nTotal indexed: {total_indexed} items")
     conn.close()
 
 
 # =============================================================================
-# Query Engine (MINE command)
+# Query Engine (MINE command) - Multi-Source Search
 # =============================================================================
 
-def find_word_in_index(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
-    """Find clips containing word from index."""
+def search_youtube_captions(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
+    """Search YouTube captions (Phase 1: subtitle timing, high confidence)."""
     variants = get_word_variants(word)
-
     results = []
     seen_videos = set()
 
     for variant in variants:
-        # Use LIKE query instead of FTS MATCH
-        # FTS5 unicode61 doesn't tokenize Chinese characters properly
         like_pattern = f'%{variant}%'
-
         try:
             rows = conn.execute("""
                 SELECT c.video_id, c.channel, c.start_time, c.end_time, c.text,
@@ -398,10 +931,151 @@ def find_word_in_index(conn: sqlite3.Connection, word: str, limit: int = 10) -> 
                         'context': row[4],
                         'title': row[5],
                         'subtitle_type': row[6],
-                        'found_variant': variant
+                        'found_variant': variant,
+                        'source_type': 'youtube',
+                        'timing_confidence': 'subtitle',
+                        'requires_asr': False,
                     })
         except sqlite3.OperationalError as e:
-            log.warning(f"FTS query error for '{variant}': {e}")
+            log.warning(f"YouTube caption query error: {e}")
+
+    return results[:limit]
+
+
+def search_podcast_notes(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
+    """Search podcast show notes (Phase 1: text hit, needs ASR for timing)."""
+    variants = get_word_variants(word)
+    results = []
+    seen_episodes = set()
+
+    for variant in variants:
+        like_pattern = f'%{variant}%'
+        try:
+            rows = conn.execute("""
+                SELECT en.episode_id, en.channel, en.text,
+                       e.title, e.audio_url, e.duration
+                FROM episode_notes en
+                JOIN episodes e ON en.episode_id = e.episode_id
+                WHERE en.text LIKE ?
+                LIMIT ?
+            """, (like_pattern, limit * 2)).fetchall()
+
+            for row in rows:
+                episode_id = row[0]
+                if episode_id not in seen_episodes:
+                    seen_episodes.add(episode_id)
+                    results.append({
+                        'video_id': episode_id,  # Use video_id for compatibility
+                        'episode_id': episode_id,
+                        'channel': row[1],
+                        'context': row[2][:200],  # Show notes snippet
+                        'title': row[3],
+                        'audio_url': row[4],
+                        'duration': row[5] or 0,
+                        'found_variant': variant,
+                        'source_type': 'podcast',
+                        'timing_confidence': 'text_only',
+                        'requires_asr': True,
+                        # Timing will be filled in by ASR
+                        'start': None,
+                        'end': None,
+                    })
+        except sqlite3.OperationalError as e:
+            log.warning(f"Podcast notes query error: {e}")
+
+    return results[:limit]
+
+
+def search_wenetspeech(conn: sqlite3.Connection, word: str, limit: int = 10) -> list[dict]:
+    """Search WenetSpeech corpus (pre-transcribed, high confidence timing)."""
+    variants = get_word_variants(word)
+    results = []
+    seen_segments = set()
+
+    for variant in variants:
+        like_pattern = f'%{variant}%'
+        try:
+            rows = conn.execute("""
+                SELECT ws.segment_id, ws.audio_path, ws.start_time, ws.end_time,
+                       ws.text, ws.speaker_id, ws.confidence, ws.domain
+                FROM wenetspeech_segments ws
+                WHERE ws.text LIKE ?
+                ORDER BY ws.confidence DESC
+                LIMIT ?
+            """, (like_pattern, limit * 2)).fetchall()
+
+            for row in rows:
+                segment_id = row[0]
+                if segment_id not in seen_segments:
+                    seen_segments.add(segment_id)
+                    results.append({
+                        'video_id': segment_id,  # Use video_id for compatibility
+                        'segment_id': segment_id,
+                        'audio_path': row[1],
+                        'start': float(row[2]),
+                        'end': float(row[3]),
+                        'context': row[4],
+                        'channel': row[7] or 'WenetSpeech',  # domain as channel
+                        'title': f"WenetSpeech: {row[4][:30]}...",
+                        'confidence': row[6],
+                        'found_variant': variant,
+                        'source_type': 'wenetspeech',
+                        'timing_confidence': 'asr_verified',
+                        'requires_asr': False,
+                    })
+        except sqlite3.OperationalError as e:
+            log.warning(f"WenetSpeech query error: {e}")
+
+    return results[:limit]
+
+
+def find_word_in_index(conn: sqlite3.Connection, word: str, limit: int = 10,
+                       sources: list[str] = None) -> list[dict]:
+    """Unified search across all source types.
+
+    Args:
+        conn: Database connection
+        word: Word to search for
+        limit: Maximum results to return
+        sources: List of source types to search ('youtube', 'podcast', 'wenetspeech', 'all')
+
+    Returns:
+        List of hits sorted by timing confidence
+    """
+    if sources is None:
+        sources = ['all']
+    if 'all' in sources:
+        sources = ['youtube', 'podcast', 'wenetspeech']
+
+    results = []
+
+    # Search each source type
+    if 'youtube' in sources:
+        youtube_results = search_youtube_captions(conn, word, limit)
+        results.extend(youtube_results)
+        if youtube_results:
+            log.info(f"  YouTube: {len(youtube_results)} hits")
+
+    if 'podcast' in sources:
+        podcast_results = search_podcast_notes(conn, word, limit)
+        results.extend(podcast_results)
+        if podcast_results:
+            log.info(f"  Podcast: {len(podcast_results)} hits (need ASR for timing)")
+
+    if 'wenetspeech' in sources:
+        wenetspeech_results = search_wenetspeech(conn, word, limit)
+        results.extend(wenetspeech_results)
+        if wenetspeech_results:
+            log.info(f"  WenetSpeech: {len(wenetspeech_results)} hits")
+
+    # Sort by timing confidence (prefer sources with verified timing)
+    confidence_order = {
+        'subtitle': 0,        # YouTube subtitles
+        'asr_verified': 1,    # WenetSpeech pre-transcribed
+        'asr_estimated': 2,   # Podcast with ASR done
+        'text_only': 3,       # Podcast show notes only
+    }
+    results.sort(key=lambda x: confidence_order.get(x.get('timing_confidence', 'text_only'), 99))
 
     return results[:limit]
 
@@ -459,7 +1133,7 @@ def create_audio_cloze(audio_path: Path, word_start: float, word_end: float,
 class AudioClip:
     """A processed audio clip ready for review."""
     word: str
-    video_id: str
+    video_id: str  # Can be video_id (YouTube) or episode_id (podcast) or segment_id (WenetSpeech)
     video_title: str
     transcript: str
     audio_full_path: Path
@@ -467,10 +1141,31 @@ class AudioClip:
     word_start: float
     word_end: float
     source_url: str
+    # Multi-source fields
+    source_type: str = 'youtube'  # 'youtube', 'podcast', 'wenetspeech'
+    timing_confidence: str = 'subtitle'  # 'subtitle', 'asr_verified', 'text_only'
 
 
-def create_clip_from_hit(word: str, hit: dict, output_dir: Path) -> Optional[AudioClip]:
-    """Download audio slice and create cloze using subtitle timing."""
+def create_clip_from_hit(word: str, hit: dict, output_dir: Path,
+                         temp_dir: Path = None) -> Optional[AudioClip]:
+    """Create audio clip from a search hit (supports multiple source types)."""
+    source_type = hit.get('source_type', 'youtube')
+    video_id = hit['video_id']
+
+    # Handle different source types
+    if source_type == 'youtube':
+        return _create_youtube_clip(word, hit, output_dir)
+    elif source_type == 'podcast':
+        return _create_podcast_clip(word, hit, output_dir, temp_dir)
+    elif source_type == 'wenetspeech':
+        return _create_wenetspeech_clip(word, hit, output_dir)
+    else:
+        log.warning(f"Unknown source type: {source_type}")
+        return None
+
+
+def _create_youtube_clip(word: str, hit: dict, output_dir: Path) -> Optional[AudioClip]:
+    """Create clip from YouTube source (existing logic)."""
     video_id = hit['video_id']
 
     # Add context padding
@@ -481,7 +1176,7 @@ def create_clip_from_hit(word: str, hit: dict, output_dir: Path) -> Optional[Aud
 
     # Download audio slice
     clip_path = output_dir / f"{word}_{video_id}_clip.mp3"
-    log.info(f"  Downloading audio slice: {start:.1f}s - {end:.1f}s")
+    log.info(f"  Downloading YouTube audio slice: {start:.1f}s - {end:.1f}s")
 
     if not download_audio_slice(video_id, start, end, clip_path):
         log.warning(f"  Failed to download audio")
@@ -508,20 +1203,153 @@ def create_clip_from_hit(word: str, hit: dict, output_dir: Path) -> Optional[Aud
         audio_cloze_path=cloze_path,
         word_start=word_start_rel,
         word_end=word_end_rel,
-        source_url=f"https://www.youtube.com/watch?v={video_id}"
+        source_url=f"https://www.youtube.com/watch?v={video_id}",
+        source_type='youtube',
+        timing_confidence='subtitle'
+    )
+
+
+def _create_podcast_clip(word: str, hit: dict, output_dir: Path,
+                         temp_dir: Path = None) -> Optional[AudioClip]:
+    """Create clip from podcast source (requires ASR for timing)."""
+    episode_id = hit['episode_id']
+    audio_url = hit.get('audio_url')
+    duration = hit.get('duration', 0)
+
+    if not audio_url:
+        log.warning(f"  No audio URL for episode {episode_id}")
+        return None
+
+    log.info(f"  Processing podcast episode: {hit['title'][:40]}...")
+
+    # Use temp directory for ASR processing
+    if temp_dir is None:
+        temp_dir = output_dir
+
+    # Run ASR to find precise timing
+    log.info(f"  Running ASR to locate '{word}' in audio...")
+    occurrences = smart_asr_localize(audio_url, word, duration, temp_dir)
+
+    if not occurrences:
+        log.warning(f"  Word '{word}' not found in podcast audio (ASR)")
+        return None
+
+    # Use the first (best confidence) occurrence
+    occ = occurrences[0]
+    log.info(f"  Found '{word}' at {occ['start']:.1f}s - {occ['end']:.1f}s")
+
+    # Add context padding
+    context_before = 8.0
+    context_after = 8.0
+    start = max(0, occ['start'] - context_before)
+    end = occ['end'] + context_after
+
+    # Download the clip segment
+    clip_path = output_dir / f"{word}_{episode_id[:8]}_clip.mp3"
+    log.info(f"  Downloading podcast clip: {start:.1f}s - {end:.1f}s")
+
+    if not download_podcast_audio(audio_url, clip_path, start, end):
+        log.warning(f"  Failed to download podcast clip")
+        return None
+
+    # Calculate relative word timing within the clip
+    word_start_rel = occ['start'] - start
+    word_end_rel = occ['end'] - start
+
+    # Create cloze version
+    cloze_path = output_dir / f"{word}_{episode_id[:8]}_cloze.mp3"
+    if not create_audio_cloze(clip_path, word_start_rel, word_end_rel, cloze_path):
+        clip_path.unlink(missing_ok=True)
+        return None
+
+    log.info(f"  Created podcast clip and cloze for '{word}'")
+
+    return AudioClip(
+        word=word,
+        video_id=episode_id,
+        video_title=hit['title'],
+        transcript=occ.get('text', hit['context']),
+        audio_full_path=clip_path,
+        audio_cloze_path=cloze_path,
+        word_start=word_start_rel,
+        word_end=word_end_rel,
+        source_url=audio_url,
+        source_type='podcast',
+        timing_confidence='asr_verified'
+    )
+
+
+def _create_wenetspeech_clip(word: str, hit: dict, output_dir: Path) -> Optional[AudioClip]:
+    """Create clip from WenetSpeech corpus (pre-transcribed)."""
+    segment_id = hit['segment_id']
+    audio_path = hit.get('audio_path')
+
+    if not audio_path or not Path(audio_path).exists():
+        log.warning(f"  WenetSpeech audio not found: {audio_path}")
+        return None
+
+    log.info(f"  Using WenetSpeech segment: {segment_id}")
+
+    # WenetSpeech already has precise timing
+    start = hit['start']
+    end = hit['end']
+
+    # Add context padding if audio file supports it
+    context_before = 2.0  # Less padding for pre-segmented clips
+    context_after = 2.0
+
+    # Copy the relevant segment
+    clip_path = output_dir / f"{word}_{segment_id[:8]}_clip.mp3"
+    try:
+        audio = AudioSegment.from_file(audio_path)
+        # For WenetSpeech, the timing is relative to the segment file
+        # So we use the segment directly with minimal padding
+        start_ms = max(0, int(start * 1000) - int(context_before * 1000))
+        end_ms = min(len(audio), int(end * 1000) + int(context_after * 1000))
+        clip_audio = audio[start_ms:end_ms]
+        clip_audio.export(str(clip_path), format="mp3")
+    except Exception as e:
+        log.warning(f"  Failed to extract WenetSpeech clip: {e}")
+        return None
+
+    # Calculate relative word timing within the clip
+    word_start_rel = context_before
+    word_end_rel = context_before + (end - start)
+
+    # Create cloze version
+    cloze_path = output_dir / f"{word}_{segment_id[:8]}_cloze.mp3"
+    if not create_audio_cloze(clip_path, word_start_rel, word_end_rel, cloze_path):
+        clip_path.unlink(missing_ok=True)
+        return None
+
+    log.info(f"  Created WenetSpeech clip and cloze for '{word}'")
+
+    return AudioClip(
+        word=word,
+        video_id=segment_id,
+        video_title=hit['title'],
+        transcript=hit['context'],
+        audio_full_path=clip_path,
+        audio_cloze_path=cloze_path,
+        word_start=word_start_rel,
+        word_end=word_end_rel,
+        source_url=f"file://{audio_path}",
+        source_type='wenetspeech',
+        timing_confidence='asr_verified'
     )
 
 
 def process_word_from_index(conn: sqlite3.Connection, word: str,
-                           output_dir: Path, max_clips: int = 2) -> list[AudioClip]:
-    """Process a word using the inverted index."""
+                           output_dir: Path, max_clips: int = 2,
+                           sources: list[str] = None) -> list[AudioClip]:
+    """Process a word using the unified multi-source index."""
     log.info(f"\n{'='*60}")
     log.info(f"MINING: {word}")
     log.info(f"{'='*60}")
 
-    # Instant lookup
+    # Unified search across all sources
     start_time = time.time()
-    hits = find_word_in_index(conn, word, limit=max_clips * 3)
+    hits = find_word_in_index(conn, word, limit=max_clips * 3, sources=sources)
     query_time = time.time() - start_time
 
     log.info(f"Found {len(hits)} hits in {query_time*1000:.1f}ms")
@@ -531,17 +1359,26 @@ def process_word_from_index(conn: sqlite3.Connection, word: str,
         return []
 
     clips = []
-    for i, hit in enumerate(hits):
-        if len(clips) >= max_clips:
-            break
 
-        log.info(f"\n--- Hit {i+1}/{len(hits)}: {hit['title'][:50]}...")
-        log.info(f"    Channel: {hit['channel']}, Type: {hit['subtitle_type']}")
-        log.info(f"    Context: {hit['context'][:60]}...")
+    # Use temp directory for podcast ASR processing
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_path = Path(temp_dir)
 
-        clip = create_clip_from_hit(word, hit, output_dir)
-        if clip:
-            clips.append(clip)
+        for i, hit in enumerate(hits):
+            if len(clips) >= max_clips:
+                break
+
+            source_type = hit.get('source_type', 'youtube')
+            timing_conf = hit.get('timing_confidence', 'unknown')
+
+            log.info(f"\n--- Hit {i+1}/{len(hits)}: {hit['title'][:50]}...")
+            log.info(f"    Source: {source_type}, Timing: {timing_conf}")
+            log.info(f"    Channel: {hit['channel']}")
+            log.info(f"    Context: {hit['context'][:60]}...")
+
+            clip = create_clip_from_hit(word, hit, output_dir, temp_path)
+            if clip:
+                clips.append(clip)
 
     log.info(f"\nWord '{word}' complete: {len(clips)} clips")
     return clips
@@ -587,7 +1424,7 @@ def cmd_mine(args):
 # =============================================================================
 
 def cmd_stats(args):
-    """STATS command: Show index statistics."""
+    """STATS command: Show multi-source index statistics."""
     db_path = Path(args.db)
 
     if not db_path.exists():
@@ -596,40 +1433,82 @@ def cmd_stats(args):
 
     conn = sqlite3.connect(str(db_path))
 
-    # Video count
+    # YouTube stats
     video_count = conn.execute("SELECT COUNT(*) FROM videos").fetchone()[0]
-
-    # Caption count
     caption_count = conn.execute("SELECT COUNT(*) FROM captions").fetchone()[0]
-
-    # Channel stats
-    channels = conn.execute("""
-        SELECT channel_name, video_count, last_crawled
-        FROM channels
-        ORDER BY video_count DESC
-    """).fetchall()
-
-    # Subtitle type breakdown
     manual = conn.execute("SELECT COUNT(*) FROM videos WHERE subtitle_type = 'manual'").fetchone()[0]
     auto = conn.execute("SELECT COUNT(*) FROM videos WHERE subtitle_type = 'auto'").fetchone()[0]
+
+    # Podcast stats
+    try:
+        episode_count = conn.execute("SELECT COUNT(*) FROM episodes").fetchone()[0]
+        episode_notes_count = conn.execute("SELECT COUNT(*) FROM episode_notes").fetchone()[0]
+    except sqlite3.OperationalError:
+        episode_count = 0
+        episode_notes_count = 0
+
+    # WenetSpeech stats
+    try:
+        wenetspeech_count = conn.execute("SELECT COUNT(*) FROM wenetspeech_segments").fetchone()[0]
+    except sqlite3.OperationalError:
+        wenetspeech_count = 0
+
+    # Channel stats with source type
+    try:
+        channels = conn.execute("""
+            SELECT channel_name, video_count, last_crawled, source_type
+            FROM channels
+            ORDER BY source_type, video_count DESC
+        """).fetchall()
+    except sqlite3.OperationalError:
+        channels = conn.execute("""
+            SELECT channel_name, video_count, last_crawled
+            FROM channels
+            ORDER BY video_count DESC
+        """).fetchall()
+        channels = [(c[0], c[1], c[2], 'youtube') for c in channels]
 
     # Database size
     db_size = db_path.stat().st_size / (1024 * 1024)
 
     print(f"\n{'='*60}")
-    print(f"INDEX STATISTICS")
+    print(f"MULTI-SOURCE INDEX STATISTICS")
     print(f"{'='*60}")
     print(f"Database: {db_path}")
     print(f"Size: {db_size:.1f} MB")
-    print(f"\nVideos indexed: {video_count}")
+
+    # YouTube section
+    print(f"\n--- YOUTUBE ---")
+    print(f"Videos indexed: {video_count}")
     print(f"  - Manual subtitles: {manual}")
     print(f"  - Auto subtitles: {auto}")
     print(f"Caption entries: {caption_count}")
 
+    # Podcast section
+    if episode_count > 0:
+        print(f"\n--- PODCASTS ---")
+        print(f"Episodes indexed: {episode_count}")
+        print(f"Show notes entries: {episode_notes_count}")
+
+    # WenetSpeech section
+    if wenetspeech_count > 0:
+        print(f"\n--- WENETSPEECH ---")
+        print(f"Segments indexed: {wenetspeech_count}")
+
+    # Sources by type
     if channels:
-        print(f"\nChannels ({len(channels)}):")
-        for name, count, last in channels:
-            print(f"  - {name}: {count} videos (crawled: {last[:10] if last else 'never'})")
+        youtube_channels = [c for c in channels if c[3] == 'youtube']
+        podcast_feeds = [c for c in channels if c[3] == 'podcast']
+
+        if youtube_channels:
+            print(f"\nYouTube Channels ({len(youtube_channels)}):")
+            for name, count, last, _ in youtube_channels:
+                print(f"  - {name}: {count} videos")
+
+        if podcast_feeds:
+            print(f"\nPodcast Feeds ({len(podcast_feeds)}):")
+            for name, count, last, _ in podcast_feeds:
+                print(f"  - {name}: {count} episodes")
 
     # Sample search to test index
     if args.test_word:
@@ -640,9 +1519,14 @@ def cmd_stats(args):
         hits = find_word_in_index(conn, args.test_word, limit=5)
         if hits:
             for i, hit in enumerate(hits):
-                print(f"\n{i+1}. {hit['title'][:50]}...")
-                print(f"   Time: {hit['start']:.1f}s - {hit['end']:.1f}s")
-                print(f"   Context: {hit['context'][:60]}...")
+                source = hit.get('source_type', 'youtube')
+                timing = hit.get('timing_confidence', 'unknown')
+                print(f"\n{i+1}. [{source.upper()}] {hit['title'][:45]}...")
+                if hit.get('start') is not None:
+                    print(f"   Time: {hit['start']:.1f}s - {hit['end']:.1f}s ({timing})")
+                else:
+                    print(f"   Timing: needs ASR")
+                print(f"   Context: {hit['context'][:55]}...")
         else:
             print(f"No results found for '{args.test_word}'")
 
@@ -670,6 +1554,8 @@ def generate_html_review(clips: list[AudioClip], output_dir: Path) -> Path:
             'word_start': clip.word_start,
             'word_end': clip.word_end,
             'source_url': clip.source_url,
+            'source_type': clip.source_type,
+            'timing_confidence': clip.timing_confidence,
         })
 
     clips_json_str = json.dumps(clips_json_data, ensure_ascii=False)
@@ -962,10 +1848,13 @@ Examples:
     subparsers = parser.add_subparsers(dest='command', help='Commands')
 
     # INDEX command
-    index_parser = subparsers.add_parser('index', help='Crawl channels and build subtitle index')
+    index_parser = subparsers.add_parser('index', help='Crawl sources and build index')
     index_parser.add_argument('--db', default='vocab.db', help='Database path')
-    index_parser.add_argument('--channels', help='File with channel URLs (one per line)')
-    index_parser.add_argument('--limit', type=int, default=500, help='Max videos per channel')
+    index_parser.add_argument('--sources', help='Sources file (supports youtube/podcast/wenetspeech)')
+    index_parser.add_argument('--channels', help='Legacy: channel URLs file (assumes YouTube)')
+    index_parser.add_argument('--type', choices=['all', 'youtube', 'podcast', 'wenetspeech'],
+                             default='all', help='Only index specific source type')
+    index_parser.add_argument('--limit', type=int, default=500, help='Max items per source')
 
     # MINE command
     mine_parser = subparsers.add_parser('mine', help='Query index and create audio clips')
