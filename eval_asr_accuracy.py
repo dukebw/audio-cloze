@@ -34,6 +34,7 @@ FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 QWEN3_OMNI_MLX_MODEL_ID = "mlx-community/Qwen3-Omni-30B-A3B-Instruct-8bit"
 QWEN3_OMNI_PROMPT_ZH = "请逐字转写音频内容，英文单词保持英文拼写，不要音译或翻译。只输出转写文本。"
+QWEN3_OMNI_PROMPT_JA = "日本語の音声を書き起こしてください。英単語は英語のまま、翻訳しないでください。出力は書き起こしのみ。"
 DEFAULT_EVAL_DIR = Path(__file__).parent / "eval_samples"
 JP_EVAL_SUBDIR = "jp_4w0bjx3L_gw"
 JP_VIDEO_ID = "4w0bjx3L_gw"
@@ -811,6 +812,8 @@ def qwen3_omni_prompt() -> str:
         return override
     if EVAL_LANGUAGE == "zh":
         return QWEN3_OMNI_PROMPT_ZH
+    if EVAL_LANGUAGE == "ja":
+        return QWEN3_OMNI_PROMPT_JA
     return "Please transcribe the audio into text."
 
 
@@ -897,13 +900,13 @@ def _transcribe_qwen3_omni_mlx(audio_path: Path) -> str:
 def transcribe_qwen3_omni(audio_path: Path) -> TranscriptionResult:
     """Transcribe with Qwen3-Omni via MLX (no PyTorch fallback)."""
     start = time.time()
-    if EVAL_LANGUAGE != "zh":
+    if EVAL_LANGUAGE not in {"zh", "ja"}:
         return TranscriptionResult(
             "qwen3-omni",
             "",
             time.time() - start,
             0,
-            error="Qwen3-Omni backend enabled for Mandarin only",
+            error="Qwen3-Omni backend enabled for Mandarin/Japanese only",
         )
     global _QWEN3_OMNI_MLX_UNSUPPORTED
     if not os.environ.get("QWEN3_OMNI_DISABLE_MLX") and not _QWEN3_OMNI_MLX_UNSUPPORTED:
@@ -941,7 +944,7 @@ LEGACY_BACKEND_MAP = {
 BASE_BACKEND_KEYS = ("whisper-large-v3", "funasr-nano", "glm-asr")
 ZH_BACKEND_KEYS = ("qwen3-omni",) + BASE_BACKEND_KEYS
 DEFAULT_BACKEND_KEYS = BASE_BACKEND_KEYS
-JP_BACKEND_KEYS = BASE_BACKEND_KEYS
+JP_BACKEND_KEYS = ("qwen3-omni",) + BASE_BACKEND_KEYS
 
 
 def normalize_backend_key(key: str) -> str:

@@ -36,5 +36,6 @@ eval_samples/**/*.flac
 # Eval artifacts
 eval_samples/**/eval_compare.html
 eval_samples/**/eval_results.json
+eval_samples/**/eval_compare_text.json
 eval_samples/**/*.bak
 eval_samples/**/*.zip
