@@ -9,15 +9,16 @@ import sqlite3
 import subprocess
 import sys
 import time
+from datetime import datetime, timezone
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Optional
 import hashlib
 from asr_utils import (
+    ensure_lzma,
     ensure_qwen3_weights,
     load_glm_asr_transformers,
     patch_funasr_load_in_8bit,
-    resolve_torch_dtype,
     select_asr_device,
 )
 
@@ -32,8 +33,7 @@ WHISPER_MODEL_PATH = Path(__file__).parent / "models" / "ggml-large-v3.bin"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 QWEN3_OMNI_MLX_MODEL_ID = "mlx-community/Qwen3-Omni-30B-A3B-Instruct-8bit"
-QWEN3_OMNI_MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
-QWEN3_OMNI_PROMPT_ZH = "请将这段中文语音转换为纯文本。"
+QWEN3_OMNI_PROMPT_ZH = "请逐字转写音频内容，英文单词保持英文拼写，不要音译或翻译。只输出转写文本。"
 DEFAULT_EVAL_DIR = Path(__file__).parent / "eval_samples"
 JP_EVAL_SUBDIR = "jp_4w0bjx3L_gw"
 JP_VIDEO_ID = "4w0bjx3L_gw"
@@ -41,6 +41,7 @@ EVAL_DIR = DEFAULT_EVAL_DIR
 DEFAULT_AUDIO_SUBDIR = "audio"
 RESULTS_FILE = EVAL_DIR / "eval_results.json"
 HTML_FILE = EVAL_DIR / "eval_compare.html"
+COMPARE_JSON_FILE = EVAL_DIR / "eval_compare_text.json"
 WHISPERX_METHOD = "whisperx"
 DEFAULT_ALIGNMENT_ORDER = (WHISPERX_METHOD,)
 DEFAULT_LANGUAGE = "zh"
@@ -54,9 +55,7 @@ _GLM_ASR_MODEL = None
 _GLM_ASR_PROCESSOR = None
 _QWEN3_OMNI_MLX_MODEL = None
 _QWEN3_OMNI_MLX_PROCESSOR = None
-_QWEN3_OMNI_MLX_CONFIG = None
-_QWEN3_OMNI_TORCH_MODEL = None
-_QWEN3_OMNI_TORCH_PROCESSOR = None
+_QWEN3_OMNI_MLX_UNSUPPORTED = False
 _WHISPERX_ALIGN_MODEL = None
 _WHISPERX_ALIGN_META = None
 _WHISPERX_ALIGN_LANGUAGE = None
@@ -112,10 +111,81 @@ class EvalResult:
 
 
 def configure_eval_dir(eval_dir: Path) -> None:
-    global EVAL_DIR, RESULTS_FILE, HTML_FILE
+    global EVAL_DIR, RESULTS_FILE, HTML_FILE, COMPARE_JSON_FILE
     EVAL_DIR = eval_dir
     RESULTS_FILE = EVAL_DIR / "eval_results.json"
     HTML_FILE = EVAL_DIR / "eval_compare.html"
+    COMPARE_JSON_FILE = EVAL_DIR / "eval_compare_text.json"
+
+
+_TRADITIONAL_CONVERTER = None
+_TRADITIONAL_UNAVAILABLE = False
+
+
+def _get_traditional_converter():
+    global _TRADITIONAL_CONVERTER, _TRADITIONAL_UNAVAILABLE
+    if _TRADITIONAL_UNAVAILABLE:
+        return None
+    if _TRADITIONAL_CONVERTER is not None:
+        return _TRADITIONAL_CONVERTER
+    try:
+        from opencc import OpenCC
+    except Exception:
+        _TRADITIONAL_UNAVAILABLE = True
+        return None
+    try:
+        _TRADITIONAL_CONVERTER = OpenCC("s2t")
+        return _TRADITIONAL_CONVERTER
+    except Exception:
+        _TRADITIONAL_UNAVAILABLE = True
+        return None
+
+
+def to_traditional(text: Optional[str]) -> Optional[str]:
+    if not text:
+        return text
+    converter = _get_traditional_converter()
+    if converter is None:
+        return text
+    try:
+        return converter.convert(text)
+    except Exception:
+        return text
+
+
+def _convert_alignment_tokens(tokens: list[dict], original: str, converted: str) -> list[dict]:
+    if not tokens:
+        return tokens
+    if original and converted and len(tokens) == len(original) == len(converted):
+        updated = []
+        for idx, tok in enumerate(tokens):
+            item = dict(tok)
+            item["text"] = converted[idx]
+            updated.append(item)
+        return updated
+    converter = _get_traditional_converter()
+    if converter is None:
+        return tokens
+    updated = []
+    for tok in tokens:
+        item = dict(tok)
+        item["text"] = converter.convert(item.get("text", ""))
+        updated.append(item)
+    return updated
+
+
+def convert_alignment_data(alignments: Optional[dict], original: str, converted: str) -> dict:
+    if not alignments:
+        return {}
+    converted_data: dict = {}
+    for method, entry in alignments.items():
+        if not entry:
+            continue
+        new_entry = dict(entry)
+        tokens = entry.get("tokens") or []
+        new_entry["tokens"] = _convert_alignment_tokens(tokens, original or "", converted or "")
+        converted_data[method] = new_entry
+    return converted_data
 
 
 def normalize_language_code(lang: Optional[str]) -> str:
@@ -745,167 +815,79 @@ def qwen3_omni_prompt() -> str:
 
 
 def qwen3_omni_max_new_tokens() -> int:
-    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", "512"))
-
-
-def _extract_sequences(outputs):
-    if isinstance(outputs, (list, tuple)):
-        outputs = outputs[0]
-    if hasattr(outputs, "sequences"):
-        return outputs.sequences
-    return outputs
+    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", "1024"))
 
 
 def _load_qwen3_omni_mlx():
-    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR, _QWEN3_OMNI_MLX_CONFIG
+    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
     if _QWEN3_OMNI_MLX_MODEL is None or _QWEN3_OMNI_MLX_PROCESSOR is None:
+        ensure_lzma()
         from mlx_vlm import load as mlx_load
-        try:
-            from mlx_vlm.utils import load_config as mlx_load_config
-        except Exception:
-            mlx_load_config = None
         model, processor = mlx_load(QWEN3_OMNI_MLX_MODEL_ID)
-        config = None
-        if mlx_load_config is not None:
-            try:
-                config = mlx_load_config(QWEN3_OMNI_MLX_MODEL_ID)
-            except Exception:
-                config = getattr(model, "config", None)
-        else:
-            config = getattr(model, "config", None)
+        if hasattr(model, "config") and hasattr(processor, "tokenizer"):
+            if not hasattr(model.config, "eos_token_id"):
+                model.config.eos_token_id = processor.tokenizer.eos_token_id
         _QWEN3_OMNI_MLX_MODEL = model
         _QWEN3_OMNI_MLX_PROCESSOR = processor
-        _QWEN3_OMNI_MLX_CONFIG = config
-    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR, _QWEN3_OMNI_MLX_CONFIG
+    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
 
 
 def _transcribe_qwen3_omni_mlx(audio_path: Path) -> str:
-    model, processor, config = _load_qwen3_omni_mlx()
-    from mlx_vlm import generate as mlx_generate
-    from mlx_vlm.prompt_utils import apply_chat_template
-
-    prompt = qwen3_omni_prompt()
-    try:
-        formatted = apply_chat_template(processor, config, prompt, num_audios=1)
-    except TypeError:
-        formatted = apply_chat_template(processor, prompt, num_audios=1)
-
-    audio = [str(audio_path)]
-    max_tokens = qwen3_omni_max_new_tokens()
-    try:
-        output = mlx_generate(
-            model,
-            processor,
-            formatted,
-            audio=audio,
-            max_tokens=max_tokens,
-            verbose=False
-        )
-    except TypeError:
-        output = mlx_generate(
-            model,
-            processor,
-            formatted,
-            audio=audio,
-            verbose=False
-        )
-    if isinstance(output, (list, tuple)):
-        output = output[0]
-    return str(output).strip()
-
-
-def _load_qwen3_omni_torch():
-    global _QWEN3_OMNI_TORCH_MODEL, _QWEN3_OMNI_TORCH_PROCESSOR
-    if _QWEN3_OMNI_TORCH_MODEL is None or _QWEN3_OMNI_TORCH_PROCESSOR is None:
-        try:
-            from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
-        except Exception:
-            from transformers import AutoModelForCausalLM, AutoProcessor
-            Qwen3OmniMoeForConditionalGeneration = AutoModelForCausalLM
-            Qwen3OmniMoeProcessor = AutoProcessor
-        dtype = resolve_torch_dtype(os.environ.get("QWEN3_OMNI_DTYPE", "auto"))
-        device_override = os.environ.get("QWEN3_OMNI_DEVICE")
-        attn_impl = os.environ.get("QWEN3_OMNI_ATTN")
-        model_kwargs = {}
-        if dtype != "auto":
-            model_kwargs["dtype"] = dtype
-        if attn_impl:
-            model_kwargs["attn_implementation"] = attn_impl
-        if device_override:
-            model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-                QWEN3_OMNI_MODEL_ID,
-                device_map=None,
-                **model_kwargs,
-            )
-            model.to(device_override)
-        else:
-            try:
-                model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-                    QWEN3_OMNI_MODEL_ID,
-                    device_map="auto",
-                    **model_kwargs,
-                )
-            except Exception:
-                device = select_asr_device("QWEN3_OMNI_DEVICE")
-                model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
-                    QWEN3_OMNI_MODEL_ID,
-                    device_map=None,
-                    **model_kwargs,
-                )
-                model.to(device)
-        processor = Qwen3OmniMoeProcessor.from_pretrained(QWEN3_OMNI_MODEL_ID)
-        _QWEN3_OMNI_TORCH_MODEL = model
-        _QWEN3_OMNI_TORCH_PROCESSOR = processor
-    return _QWEN3_OMNI_TORCH_MODEL, _QWEN3_OMNI_TORCH_PROCESSOR
-
-
-def _transcribe_qwen3_omni_torch(audio_path: Path) -> str:
-    model, processor = _load_qwen3_omni_torch()
-    try:
-        from qwen_omni_utils import process_mm_info
-    except Exception:
-        from qwen_omni_utils import process_mm_input as process_mm_info
+    model, processor = _load_qwen3_omni_mlx()
+    import librosa
+    import numpy as np
+    import mlx.core as mx
 
     prompt = qwen3_omni_prompt()
     conversation = [
         {
             "role": "user",
             "content": [
-                {"type": "audio", "audio": str(audio_path)},
+                {"type": "audio", "audio": "placeholder"},
                 {"type": "text", "text": prompt},
             ],
         }
     ]
-    text = processor.apply_chat_template(
+    formatted = processor.apply_chat_template(
         conversation,
         tokenize=False,
         add_generation_prompt=True,
     )
-    use_audio_in_video = False
-    audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
-    inputs = processor(
-        text=[text],
-        audios=audios,
-        images=images,
-        videos=videos,
+
+    sr = getattr(processor.feature_extractor, "sampling_rate", 16000)
+    audio, _ = librosa.load(str(audio_path), sr=sr)
+    processed = processor(
+        text=formatted,
+        audio=[audio],
         padding=True,
-        return_tensors="pt",
-        use_audio_in_video=use_audio_in_video,
+        return_attention_mask=True,
+        return_tensors=None,
     )
-    inputs = inputs.to(model.device)
-    try:
-        inputs = inputs.to(model.dtype)
-    except Exception:
-        pass
-    outputs = model.generate(
-        **inputs,
-        do_sample=False,
-        max_new_tokens=qwen3_omni_max_new_tokens(),
+
+    input_ids = mx.array(processed["input_ids"])
+    feature_attention_mask = np.array(processed["feature_attention_mask"], dtype=np.int32)
+    audio_feature_lengths = np.sum(feature_attention_mask, axis=-1, dtype=np.int32)
+    input_features = np.array(processed["input_features"])
+
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    thinker_eos = getattr(model.config, "eos_token_id", None)
+    if thinker_eos is None:
+        thinker_eos = getattr(tokenizer, "eos_token_id", None)
+    thinker_result, _ = model.generate(
+        input_ids,
+        return_audio=False,
+        thinker_max_new_tokens=qwen3_omni_max_new_tokens(),
+        thinker_temperature=0.0,
+        thinker_top_p=1.0,
+        thinker_eos_token_id=thinker_eos,
+        input_features=mx.array(input_features),
+        feature_attention_mask=mx.array(feature_attention_mask),
+        audio_feature_lengths=mx.array(audio_feature_lengths, dtype=mx.int32),
     )
-    sequences = _extract_sequences(outputs)
-    prompt_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
-    decoded = processor.batch_decode(
-        sequences[:, prompt_len:],
+    sequences = thinker_result.sequences
+    prompt_len = input_ids.shape[1]
+    decoded = tokenizer.batch_decode(
+        sequences[:, prompt_len:].tolist(),
         skip_special_tokens=True,
         clean_up_tokenization_spaces=False,
     )
@@ -913,7 +895,7 @@ def _transcribe_qwen3_omni_torch(audio_path: Path) -> str:
 
 
 def transcribe_qwen3_omni(audio_path: Path) -> TranscriptionResult:
-    """Transcribe with Qwen3-Omni (MLX preferred; PyTorch fallback)."""
+    """Transcribe with Qwen3-Omni via MLX (no PyTorch fallback)."""
     start = time.time()
     if EVAL_LANGUAGE != "zh":
         return TranscriptionResult(
@@ -923,26 +905,32 @@ def transcribe_qwen3_omni(audio_path: Path) -> TranscriptionResult:
             0,
             error="Qwen3-Omni backend enabled for Mandarin only",
         )
-    mlx_error = None
-    if not os.environ.get("QWEN3_OMNI_DISABLE_MLX"):
+    global _QWEN3_OMNI_MLX_UNSUPPORTED
+    if not os.environ.get("QWEN3_OMNI_DISABLE_MLX") and not _QWEN3_OMNI_MLX_UNSUPPORTED:
         try:
             text = _transcribe_qwen3_omni_mlx(audio_path)
             return TranscriptionResult("qwen3-omni", text, time.time() - start, len(text))
         except Exception as e:
-            mlx_error = str(e)
-    try:
-        text = _transcribe_qwen3_omni_torch(audio_path)
-        return TranscriptionResult("qwen3-omni", text, time.time() - start, len(text))
-    except Exception as e:
-        error = f"mlx failed: {mlx_error}; torch failed: {e}" if mlx_error else str(e)
-        return TranscriptionResult("qwen3-omni", "", time.time() - start, 0, error=error)
+            _QWEN3_OMNI_MLX_UNSUPPORTED = True
+            error = (
+                "Qwen3-Omni MLX failed. Ensure mlx-vlm >= 0.3.10 (GitHub) and "
+                f"audio decoding support are available. Error: {e}"
+            )
+            return TranscriptionResult("qwen3-omni", "", time.time() - start, 0, error=error)
+    return TranscriptionResult(
+        "qwen3-omni",
+        "",
+        time.time() - start,
+        0,
+        error="Qwen3-Omni MLX backend disabled or unsupported",
+    )
 
 
 BACKEND_SPECS = [
+    BackendSpec("qwen3-omni", "Qwen3-Omni-30B-A3B", "qwen3-omni", transcribe_qwen3_omni),
     BackendSpec("whisper-large-v3", "Whisper-Large-V3", "whisper", transcribe_whisper_cpp),
     BackendSpec("funasr-nano", "Fun-ASR-Nano", "funasr", transcribe_funasr),
     BackendSpec("glm-asr", "GLM-ASR", "glm", transcribe_glm_asr),
-    BackendSpec("qwen3-omni", "Qwen3-Omni-30B-A3B", "qwen3-omni", transcribe_qwen3_omni),
 ]
 BACKEND_BY_KEY = {spec.key: spec for spec in BACKEND_SPECS}
 LEGACY_BACKEND_MAP = {
@@ -951,7 +939,7 @@ LEGACY_BACKEND_MAP = {
     "funasr-nano": "funasr-nano",
 }
 BASE_BACKEND_KEYS = ("whisper-large-v3", "funasr-nano", "glm-asr")
-ZH_BACKEND_KEYS = BASE_BACKEND_KEYS + ("qwen3-omni",)
+ZH_BACKEND_KEYS = ("qwen3-omni",) + BASE_BACKEND_KEYS
 DEFAULT_BACKEND_KEYS = BASE_BACKEND_KEYS
 JP_BACKEND_KEYS = BASE_BACKEND_KEYS
 
@@ -992,7 +980,8 @@ def generate_html_report(
     backend_labels = {spec.key: spec.label for spec in backend_specs}
     backend_css = {spec.key: spec.css_class for spec in backend_specs}
     safe_lang = html_lib.escape(page_lang)
-    safe_title = html_lib.escape(page_title)
+    display_title = to_traditional(page_title) or page_title
+    safe_title = html_lib.escape(display_title)
 
     # Calculate aggregate benchmark stats
     benchmark_stats = {}
@@ -1303,14 +1292,16 @@ def generate_html_report(
 
     for i, result in enumerate(results):
         sample = result.sample
-        safe_title = html_lib.escape(sample.title)
-        safe_channel = html_lib.escape(sample.channel)
+        display_sample_title = to_traditional(sample.title) or sample.title
+        display_sample_channel = to_traditional(sample.channel) or sample.channel
+        safe_sample_title = html_lib.escape(display_sample_title)
+        safe_sample_channel = html_lib.escape(display_sample_channel)
         html += f'''
         <div class="sample" data-type="{sample.source_type}" id="sample-{i}">
             <div class="sample-header">
                 <div>
-                    <h3>{safe_title[:60]}{'...' if len(safe_title) > 60 else ''}</h3>
-                    <div class="sample-meta">{safe_channel} • {sample.start_time:.0f}s - {sample.start_time + sample.duration:.0f}s</div>
+                    <h3>{safe_sample_title[:60]}{'...' if len(safe_sample_title) > 60 else ''}</h3>
+                    <div class="sample-meta">{safe_sample_channel} • {sample.start_time:.0f}s - {sample.start_time + sample.duration:.0f}s</div>
                 </div>
                 <span class="sample-type">{sample.source_type.upper()}</span>
             </div>
@@ -1328,11 +1319,14 @@ def generate_html_report(
             alignment_data_html = ""
             text_html = ""
             if tr.error:
-                text_html = f'<span class="error">Error: {html_lib.escape(tr.error)}</span>'
+                error_text = to_traditional(tr.error) or tr.error
+                text_html = f'<span class="error">Error: {html_lib.escape(error_text)}</span>'
             else:
+                display_text = to_traditional(tr.text) or tr.text
                 alignments = tr.alignments or {}
                 default_alignment = None
                 if alignments:
+                    alignments = convert_alignment_data(alignments, tr.text, display_text)
                     default_alignment = choose_default_alignment(alignments)
                 if alignments and default_alignment:
                     payload = {"default": default_alignment, "methods": alignments}
@@ -1340,7 +1334,7 @@ def generate_html_report(
                     alignment_data_html = f'<script type="application/json" class="alignment-data">{payload_json}</script>'
                     text_html = '<span class="error">Loading alignment…</span>'
                 else:
-                    safe_text = html_lib.escape(tr.text)
+                    safe_text = html_lib.escape(display_text)
                     text_html = safe_text if safe_text else '<span class="error">No transcription</span>'
 
             speed_str = f"{tr.realtime_speed:.1f}x RT" if tr.realtime_speed > 0 else "N/A"
@@ -1568,6 +1562,56 @@ def generate_html_report(
     return html
 
 
+def generate_text_compare_json(
+    results: list[EvalResult],
+    backend_specs: list[BackendSpec],
+    page_lang: str = "zh",
+    page_title: str = "ASR Accuracy Evaluation",
+) -> dict:
+    backend_keys = [spec.key for spec in backend_specs]
+    backend_labels = {spec.key: spec.label for spec in backend_specs}
+    payload = {
+        "schema_version": 1,
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "language": page_lang,
+        "title": to_traditional(page_title) or page_title,
+        "backends": [
+            {"key": spec.key, "label": spec.label}
+            for spec in backend_specs
+        ],
+        "samples": [],
+    }
+    for result in results:
+        sample_dict = asdict(result.sample)
+        sample_dict["title"] = to_traditional(sample_dict.get("title")) or sample_dict.get("title")
+        sample_dict["channel"] = to_traditional(sample_dict.get("channel")) or sample_dict.get("channel")
+        transcriptions: dict = {}
+        for key in backend_keys:
+            tr = result.transcriptions.get(key)
+            if tr is None:
+                transcriptions[key] = {
+                    "label": backend_labels.get(key, key),
+                    "text": "",
+                    "error": "Not run",
+                }
+                continue
+            text = to_traditional(tr.text) or tr.text
+            error = to_traditional(tr.error) if tr.error else None
+            transcriptions[key] = {
+                "label": backend_labels.get(key, key),
+                "text": text or "",
+                "error": error,
+                "elapsed_seconds": tr.elapsed_seconds,
+                "realtime_speed": tr.realtime_speed,
+                "word_count": tr.word_count,
+            }
+        payload["samples"].append({
+            "sample": sample_dict,
+            "transcriptions": transcriptions,
+        })
+    return payload
+
+
 def run_transcriptions(
     audio_path: Path,
     backend_specs: list[BackendSpec],
@@ -1791,10 +1835,28 @@ def main():
     page_title = "ASR Accuracy Evaluation"
     if args.japanese:
         page_title = "ASR Accuracy Evaluation (Japanese)"
-    html = generate_html_report(results, backend_specs, page_lang=EVAL_LANGUAGE, page_title=page_title)
+    report_keys = [
+        spec.key
+        for spec in BACKEND_SPECS
+        if any(spec.key in r.transcriptions for r in results)
+    ]
+    if not report_keys:
+        report_keys = [spec.key for spec in backend_specs]
+    report_specs = [BACKEND_BY_KEY[key] for key in report_keys if key in BACKEND_BY_KEY]
+    html = generate_html_report(results, report_specs, page_lang=EVAL_LANGUAGE, page_title=page_title)
     with open(HTML_FILE, 'w', encoding='utf-8') as f:
         f.write(html)
     print(f"  HTML saved to: {HTML_FILE}")
+
+    compare_payload = generate_text_compare_json(
+        results,
+        report_specs,
+        page_lang=EVAL_LANGUAGE,
+        page_title=page_title,
+    )
+    with open(COMPARE_JSON_FILE, 'w', encoding='utf-8') as f:
+        json.dump(compare_payload, f, ensure_ascii=False, indent=2)
+    print(f"  Text compare JSON saved to: {COMPARE_JSON_FILE}")
 
     # Summary
     print(f"\n{'='*60}")
@@ -1827,6 +1889,7 @@ def main():
 
     print(f"\n{'='*60}")
     print(f"Open {HTML_FILE} in your browser to compare transcriptions!")
+    print(f"JSON comparison output: {COMPARE_JSON_FILE}")
     print("=" * 60)
 
 

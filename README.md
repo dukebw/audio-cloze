@@ -141,8 +141,14 @@ python eval_asr_accuracy.py --fresh --num-youtube 10 --num-podcast 6 \
   --backends whisper-large-v3,funasr-nano,glm-asr
 ```
 
-Results are written to `eval_samples/eval_results.json` and
-`eval_samples/eval_compare.html`. Audio clips are cached under
+Qwen3-Omni (MLX, Mandarin evals only) requires `mlx-vlm` 0.3.10+ (GitHub install)
+and uses `librosa`/`soundfile` for audio decoding (mp3 may require ffmpeg or
+another audioread backend).
+
+Results are written to `eval_samples/eval_results.json`,
+`eval_samples/eval_compare.html`, and `eval_samples/eval_compare_text.json`.
+The HTML and comparison JSON normalize output text to traditional characters
+when `opencc-python-reimplemented` is installed. Audio clips are cached under
 `eval_samples/audio` (gitignored). Use `--audio-dir` to change the cache
 location.
 
