@@ -32,3 +32,9 @@ eval_samples/**/*.mp3
 eval_samples/**/*.wav
 eval_samples/**/*.m4a
 eval_samples/**/*.flac
+
+# Eval artifacts
+eval_samples/**/eval_compare.html
+eval_samples/**/eval_results.json
+eval_samples/**/*.bak
+eval_samples/**/*.zip
