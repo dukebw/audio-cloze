@@ -25,22 +25,32 @@ SAMPLE_DURATION = 45  # seconds per sample
 NUM_YOUTUBE_SAMPLES = 18
 NUM_PODCAST_SAMPLES = 12
 TOTAL_SAMPLES = NUM_YOUTUBE_SAMPLES + NUM_PODCAST_SAMPLES
+NUM_JP_SAMPLES = 10
 
 WHISPER_MODEL_PATH = Path(__file__).parent / "models" / "ggml-large-v3.bin"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
-EVAL_DIR = Path(__file__).parent / "eval_samples"
+DEFAULT_EVAL_DIR = Path(__file__).parent / "eval_samples"
+JP_EVAL_SUBDIR = "jp_4w0bjx3L_gw"
+JP_VIDEO_ID = "4w0bjx3L_gw"
+EVAL_DIR = DEFAULT_EVAL_DIR
 DEFAULT_AUDIO_SUBDIR = "audio"
 RESULTS_FILE = EVAL_DIR / "eval_results.json"
 HTML_FILE = EVAL_DIR / "eval_compare.html"
 WHISPERX_METHOD = "whisperx"
 DEFAULT_ALIGNMENT_ORDER = (WHISPERX_METHOD,)
+DEFAULT_LANGUAGE = "zh"
+EVAL_LANGUAGE = DEFAULT_LANGUAGE
+ALIGNMENT_LANGUAGE = DEFAULT_LANGUAGE
+WHISPER_LANGUAGE = DEFAULT_LANGUAGE
+FUNASR_LANGUAGE = "中文"
 
 _FUNASR_MODEL = None
 _GLM_ASR_MODEL = None
 _GLM_ASR_PROCESSOR = None
 _WHISPERX_ALIGN_MODEL = None
 _WHISPERX_ALIGN_META = None
+_WHISPERX_ALIGN_LANGUAGE = None
 _WHISPERX_PATCHED = False
 
 
@@ -90,6 +100,44 @@ class EvalResult:
     """Complete evaluation result for a sample."""
     sample: Sample
     transcriptions: dict  # backend -> TranscriptionResult
+
+
+def configure_eval_dir(eval_dir: Path) -> None:
+    global EVAL_DIR, RESULTS_FILE, HTML_FILE
+    EVAL_DIR = eval_dir
+    RESULTS_FILE = EVAL_DIR / "eval_results.json"
+    HTML_FILE = EVAL_DIR / "eval_compare.html"
+
+
+def normalize_language_code(lang: Optional[str]) -> str:
+    if not lang:
+        return DEFAULT_LANGUAGE
+    code = lang.lower().replace("_", "-").strip()
+    if code in {"zh", "zh-cn", "zh-hans", "zh-hant", "zh-tw"}:
+        return "zh"
+    if code in {"ja", "jp", "jpn"}:
+        return "ja"
+    return code
+
+
+def funasr_language_for(lang_code: str) -> str:
+    if lang_code == "zh":
+        return "中文"
+    if lang_code == "ja":
+        return "日语"
+    return "auto"
+
+
+def configure_language(language: str, align_language: Optional[str] = None) -> None:
+    global EVAL_LANGUAGE, WHISPER_LANGUAGE, ALIGNMENT_LANGUAGE, FUNASR_LANGUAGE
+    code = normalize_language_code(language)
+    EVAL_LANGUAGE = code
+    WHISPER_LANGUAGE = code
+    if align_language:
+        ALIGNMENT_LANGUAGE = normalize_language_code(align_language)
+    else:
+        ALIGNMENT_LANGUAGE = code
+    FUNASR_LANGUAGE = funasr_language_for(code)
 
 
 def resolve_audio_dir(audio_dir_arg: str) -> Path:
@@ -200,6 +248,115 @@ def get_random_podcast_samples(conn: sqlite3.Connection, n: int) -> list[dict]:
             'start_time': start,
         })
     return samples
+
+
+def get_youtube_metadata(video_id: str) -> dict:
+    url = f"https://www.youtube.com/watch?v={video_id}"
+    cmd = ["yt-dlp", "-J", "--no-playlist", url]
+    result = subprocess.run(cmd, capture_output=True, text=True, timeout=120)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.strip() or "yt-dlp failed")
+    data = json.loads(result.stdout)
+    return {
+        "video_id": video_id,
+        "title": data.get("title") or "",
+        "channel": data.get("channel") or data.get("uploader") or "",
+        "duration": float(data.get("duration") or 0),
+    }
+
+
+def sample_evenly_spaced_starts(duration: float, count: int) -> list[float]:
+    if count <= 0:
+        return []
+    min_start = 30.0
+    max_start = duration - SAMPLE_DURATION - 30.0
+    if max_start < min_start:
+        min_start = 0.0
+        max_start = max(0.0, duration - SAMPLE_DURATION)
+    if max_start <= min_start:
+        return [min_start] * count
+    span = max_start - min_start
+    step = span / count
+    return [min_start + step * (i + 0.5) for i in range(count)]
+
+
+def get_fixed_youtube_samples(video_id: str, count: int) -> list[dict]:
+    meta = get_youtube_metadata(video_id)
+    duration = meta["duration"]
+    if duration <= 0:
+        raise RuntimeError("Missing YouTube duration for sampling")
+    starts = sample_evenly_spaced_starts(duration, count)
+    samples = []
+    for idx, start in enumerate(starts):
+        samples.append({
+            "video_id": video_id,
+            "title": meta["title"],
+            "channel": meta["channel"],
+            "duration": duration,
+            "start_time": float(start),
+            "index": idx,
+        })
+    return samples
+
+
+def youtube_sample_id(sample: dict) -> str:
+    index = sample.get("index")
+    start = int(sample["start_time"])
+    if index is None:
+        return f"yt_{sample['video_id']}_{start}"
+    return f"yt_{sample['video_id']}_{index:02d}_{start}"
+
+
+def youtube_sample_title(sample: dict) -> str:
+    index = sample.get("index")
+    title = sample.get("title") or ""
+    if index is None:
+        return title
+    return f"{title} (JP clip {index + 1})"
+
+
+def process_youtube_samples(
+    youtube_samples: list[dict],
+    audio_dir: Path,
+    backend_specs: list[BackendSpec],
+    results: list[EvalResult],
+    heading: str,
+) -> None:
+    print(f"\n{'='*60}")
+    print(heading)
+    print("=" * 60)
+    for i, yt in enumerate(youtube_samples):
+        print(f"\n[{i+1}/{len(youtube_samples)}] {yt['title'][:50]}...")
+        sample_id = youtube_sample_id(yt)
+        audio_path = audio_dir / f"{sample_id}.mp3"
+
+        if not audio_path.exists():
+            print(f"  Downloading {SAMPLE_DURATION}s from {yt['start_time']:.0f}s...")
+            if not download_youtube_sample(yt['video_id'], yt['start_time'], SAMPLE_DURATION, audio_path):
+                print("  FAILED to download, skipping")
+                continue
+
+        sample = Sample(
+            sample_id=sample_id,
+            source_type='youtube',
+            source_id=yt['video_id'],
+            title=youtube_sample_title(yt),
+            channel=yt['channel'],
+            audio_path=relative_audio_path(audio_path),
+            start_time=yt['start_time'],
+            duration=SAMPLE_DURATION
+        )
+
+        transcriptions = run_transcriptions(
+            audio_path,
+            backend_specs,
+            audio_duration=sample.duration
+        )
+
+        results.append(EvalResult(
+            sample=sample,
+            transcriptions=transcriptions
+        ))
 
 
 def download_youtube_sample(video_id: str, start: float, duration: float, output_path: Path) -> bool:
@@ -350,13 +507,18 @@ def _whisperx_tokens(audio_path: Path, transcript: str) -> list[dict]:
         import whisperx
     except Exception as e:
         raise RuntimeError(f"missing deps: {e}")
-    global _WHISPERX_ALIGN_MODEL, _WHISPERX_ALIGN_META
+    global _WHISPERX_ALIGN_MODEL, _WHISPERX_ALIGN_META, _WHISPERX_ALIGN_LANGUAGE
     device = "cpu"
-    if _WHISPERX_ALIGN_MODEL is None or _WHISPERX_ALIGN_META is None:
+    if (
+        _WHISPERX_ALIGN_MODEL is None
+        or _WHISPERX_ALIGN_META is None
+        or _WHISPERX_ALIGN_LANGUAGE != ALIGNMENT_LANGUAGE
+    ):
         _WHISPERX_ALIGN_MODEL, _WHISPERX_ALIGN_META = whisperx.load_align_model(
-            language_code="zh",
+            language_code=ALIGNMENT_LANGUAGE,
             device=device,
         )
+        _WHISPERX_ALIGN_LANGUAGE = ALIGNMENT_LANGUAGE
     audio = whisperx.load_audio(str(audio_path))
     duration = audio.shape[0] / whisperx.audio.SAMPLE_RATE
     segments = [{"start": 0.0, "end": float(duration), "text": transcript}]
@@ -442,7 +604,7 @@ def transcribe_whisper_cpp(audio_path: Path) -> TranscriptionResult:
         cmd = [
             "whisper-cli",
             "-m", str(WHISPER_MODEL_PATH),
-            "-l", "zh",
+            "-l", WHISPER_LANGUAGE,
             "-t", "8", "-p", "4",
             "-ojf",  # Full JSON output with token timestamps
             "-of", str(output_base),
@@ -480,7 +642,7 @@ def transcribe_mlx_whisper(audio_path: Path) -> TranscriptionResult:
         result = mlx_whisper.transcribe(
             str(audio_path),
             path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
-            language="zh",
+            language=WHISPER_LANGUAGE,
             word_timestamps=True,
         )
         elapsed = time.time() - start
@@ -514,7 +676,7 @@ def transcribe_funasr(audio_path: Path) -> TranscriptionResult:
             input=[str(audio_path)],
             cache={},
             batch_size=1,
-            language="中文",
+            language=FUNASR_LANGUAGE,
             itn=True
         )
         elapsed = time.time() - start
@@ -575,6 +737,8 @@ LEGACY_BACKEND_MAP = {
     "mlx-whisper": "mlx-whisper",
     "funasr-nano": "funasr-nano",
 }
+DEFAULT_BACKEND_KEYS = ("whisper-large-v3", "funasr-nano", "glm-asr")
+JP_BACKEND_KEYS = DEFAULT_BACKEND_KEYS
 
 
 def normalize_backend_key(key: str) -> str:
@@ -601,12 +765,19 @@ def load_existing_results() -> list[EvalResult]:
     return results
 
 
-def generate_html_report(results: list[EvalResult], backend_specs: list[BackendSpec]) -> str:
+def generate_html_report(
+    results: list[EvalResult],
+    backend_specs: list[BackendSpec],
+    page_lang: str = "zh",
+    page_title: str = "ASR Accuracy Evaluation",
+) -> str:
     """Generate HTML comparison interface."""
 
     backend_keys = [spec.key for spec in backend_specs]
     backend_labels = {spec.key: spec.label for spec in backend_specs}
     backend_css = {spec.key: spec.css_class for spec in backend_specs}
+    safe_lang = html_lib.escape(page_lang)
+    safe_title = html_lib.escape(page_title)
 
     # Calculate aggregate benchmark stats
     benchmark_stats = {}
@@ -632,11 +803,11 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
         }
 
     html = '''<!DOCTYPE html>
-<html lang="zh">
+<html lang="''' + safe_lang + '''">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>ASR Accuracy Evaluation</title>
+    <title>''' + safe_title + '''</title>
     <style>
         * { box-sizing: border-box; }
         body {
@@ -852,7 +1023,7 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
     </style>
 </head>
 <body>
-    <h1>🎙️ ASR Accuracy Evaluation</h1>
+    <h1>🎙️ ''' + safe_title + '''</h1>
 
     <div class="stats">
         <div class="stat-card">
@@ -1220,13 +1391,40 @@ def main():
                         help="Number of YouTube samples to evaluate")
     parser.add_argument("--num-podcast", type=int, default=NUM_PODCAST_SAMPLES,
                         help="Number of podcast samples to evaluate")
+    parser.add_argument("--japanese", action="store_true",
+                        help="Run a Japanese-only eval on a fixed YouTube video")
+    parser.add_argument("--jp-video-id", default=JP_VIDEO_ID,
+                        help="YouTube video ID for Japanese eval")
+    parser.add_argument("--jp-samples", type=int, default=NUM_JP_SAMPLES,
+                        help="Number of Japanese clips to sample")
+    parser.add_argument("--eval-dir", default=None,
+                        help="Output directory for eval results (defaults to eval_samples or jp subdir)")
     parser.add_argument("--audio-dir", default=DEFAULT_AUDIO_SUBDIR,
                         help="Audio cache directory (relative to eval_samples unless absolute)")
-    parser.add_argument("--backends", default=",".join(spec.key for spec in BACKEND_SPECS),
+    parser.add_argument("--backends", default=None,
                         help="Comma-separated backend keys to run")
+    parser.add_argument("--language", default=None,
+                        help="Language code for ASR models (e.g., zh, ja)")
+    parser.add_argument("--align-language", default=None,
+                        help="Language code for alignment (defaults to --language)")
     args = parser.parse_args()
 
-    backend_keys = [b.strip() for b in args.backends.split(",") if b.strip()]
+    eval_dir = None
+    if args.eval_dir:
+        eval_dir = Path(args.eval_dir).expanduser()
+    elif args.japanese:
+        eval_dir = DEFAULT_EVAL_DIR / JP_EVAL_SUBDIR
+    else:
+        eval_dir = DEFAULT_EVAL_DIR
+    configure_eval_dir(eval_dir)
+
+    language = args.language or ("ja" if args.japanese else DEFAULT_LANGUAGE)
+    configure_language(language, args.align_language)
+
+    if args.backends:
+        backend_keys = [b.strip() for b in args.backends.split(",") if b.strip()]
+    else:
+        backend_keys = list(JP_BACKEND_KEYS if args.japanese else DEFAULT_BACKEND_KEYS)
     unknown = [b for b in backend_keys if b not in BACKEND_BY_KEY]
     if unknown:
         print(f"ERROR: Unknown backend(s): {', '.join(unknown)}")
@@ -1274,100 +1472,83 @@ def main():
         if conn is not None:
             conn.close()
     else:
-        # Connect to database
-        db_path = Path(__file__).parent / "vocab.db"
-        if not db_path.exists():
-            print(f"ERROR: Database not found: {db_path}")
-            sys.exit(1)
+        if args.japanese:
+            print(f"\nSelecting {args.jp_samples} Japanese YouTube samples...")
+            youtube_samples = get_fixed_youtube_samples(args.jp_video_id, args.jp_samples)
+            print(f"  Video: {args.jp_video_id}")
+            print(f"  Samples: {len(youtube_samples)}")
 
-        conn = sqlite3.connect(str(db_path))
-
-        # Get samples
-        print(f"\nSelecting {args.num_youtube} YouTube + {args.num_podcast} podcast samples...")
-        youtube_samples = get_random_youtube_samples(conn, args.num_youtube)
-        podcast_samples = get_random_podcast_samples(conn, args.num_podcast)
-
-        print(f"  YouTube samples: {len(youtube_samples)}")
-        print(f"  Podcast samples: {len(podcast_samples)}")
-
-        # Process YouTube samples
-        print(f"\n{'='*60}")
-        print("Processing YouTube samples...")
-        print("=" * 60)
-
-        for i, yt in enumerate(youtube_samples):
-            print(f"\n[{i+1}/{len(youtube_samples)}] {yt['title'][:50]}...")
-            sample_id = f"yt_{yt['video_id']}_{int(yt['start_time'])}"
-            audio_path = audio_dir / f"{sample_id}.mp3"
-
-            if not audio_path.exists():
-                print(f"  Downloading {SAMPLE_DURATION}s from {yt['start_time']:.0f}s...")
-                if not download_youtube_sample(yt['video_id'], yt['start_time'], SAMPLE_DURATION, audio_path):
-                    print("  FAILED to download, skipping")
-                    continue
-
-            sample = Sample(
-                sample_id=sample_id,
-                source_type='youtube',
-                source_id=yt['video_id'],
-                title=yt['title'],
-                channel=yt['channel'],
-                audio_path=relative_audio_path(audio_path),
-                start_time=yt['start_time'],
-                duration=SAMPLE_DURATION
-            )
-
-            transcriptions = run_transcriptions(
-                audio_path,
+            process_youtube_samples(
+                youtube_samples,
+                audio_dir,
                 backend_specs,
-                audio_duration=sample.duration
+                results,
+                heading="Processing Japanese YouTube samples...",
             )
+        else:
+            # Connect to database
+            db_path = Path(__file__).parent / "vocab.db"
+            if not db_path.exists():
+                print(f"ERROR: Database not found: {db_path}")
+                sys.exit(1)
 
-            results.append(EvalResult(
-                sample=sample,
-                transcriptions=transcriptions
-            ))
+            conn = sqlite3.connect(str(db_path))
 
-        # Process podcast samples
-        print(f"\n{'='*60}")
-        print("Processing Podcast samples...")
-        print("=" * 60)
+            # Get samples
+            print(f"\nSelecting {args.num_youtube} YouTube + {args.num_podcast} podcast samples...")
+            youtube_samples = get_random_youtube_samples(conn, args.num_youtube)
+            podcast_samples = get_random_podcast_samples(conn, args.num_podcast)
 
-        for i, pod in enumerate(podcast_samples):
-            print(f"\n[{i+1}/{len(podcast_samples)}] {pod['title'][:50]}...")
-            sample_id = f"pod_{pod['episode_id'][:8]}_{int(pod['start_time'])}"
-            audio_path = audio_dir / f"{sample_id}.mp3"
+            print(f"  YouTube samples: {len(youtube_samples)}")
+            print(f"  Podcast samples: {len(podcast_samples)}")
 
-            if not audio_path.exists():
-                print(f"  Downloading {SAMPLE_DURATION}s from {pod['start_time']:.0f}s...")
-                if not download_podcast_sample(pod['audio_url'], pod['start_time'], SAMPLE_DURATION, audio_path):
-                    print("  FAILED to download, skipping")
-                    continue
-
-            sample = Sample(
-                sample_id=sample_id,
-                source_type='podcast',
-                source_id=pod['episode_id'],
-                title=pod['title'],
-                channel=pod['channel'],
-                audio_path=relative_audio_path(audio_path),
-                start_time=pod['start_time'],
-                duration=SAMPLE_DURATION
-            )
-
-            transcriptions = run_transcriptions(
-                audio_path,
+            process_youtube_samples(
+                youtube_samples,
+                audio_dir,
                 backend_specs,
-                audio_duration=sample.duration
+                results,
+                heading="Processing YouTube samples...",
             )
 
-            results.append(EvalResult(
-                sample=sample,
-                transcriptions=transcriptions
-            ))
+            # Process podcast samples
+            print(f"\n{'='*60}")
+            print("Processing Podcast samples...")
+            print("=" * 60)
 
+            for i, pod in enumerate(podcast_samples):
+                print(f"\n[{i+1}/{len(podcast_samples)}] {pod['title'][:50]}...")
+                sample_id = f"pod_{pod['episode_id'][:8]}_{int(pod['start_time'])}"
+                audio_path = audio_dir / f"{sample_id}.mp3"
 
-        conn.close()
+                if not audio_path.exists():
+                    print(f"  Downloading {SAMPLE_DURATION}s from {pod['start_time']:.0f}s...")
+                    if not download_podcast_sample(pod['audio_url'], pod['start_time'], SAMPLE_DURATION, audio_path):
+                        print("  FAILED to download, skipping")
+                        continue
+
+                sample = Sample(
+                    sample_id=sample_id,
+                    source_type='podcast',
+                    source_id=pod['episode_id'],
+                    title=pod['title'],
+                    channel=pod['channel'],
+                    audio_path=relative_audio_path(audio_path),
+                    start_time=pod['start_time'],
+                    duration=SAMPLE_DURATION
+                )
+
+                transcriptions = run_transcriptions(
+                    audio_path,
+                    backend_specs,
+                    audio_duration=sample.duration
+                )
+
+                results.append(EvalResult(
+                    sample=sample,
+                    transcriptions=transcriptions
+                ))
+
+            conn.close()
 
     # Save results
     print(f"\n{'='*60}")
@@ -1386,7 +1567,10 @@ def main():
     print(f"  Results saved to: {RESULTS_FILE}")
 
     # Generate HTML
-    html = generate_html_report(results, backend_specs)
+    page_title = "ASR Accuracy Evaluation"
+    if args.japanese:
+        page_title = "ASR Accuracy Evaluation (Japanese)"
+    html = generate_html_report(results, backend_specs, page_lang=EVAL_LANGUAGE, page_title=page_title)
     with open(HTML_FILE, 'w', encoding='utf-8') as f:
         f.write(html)
     print(f"  HTML saved to: {HTML_FILE}")

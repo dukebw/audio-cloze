@@ -104,9 +104,18 @@ def load_glm_asr_transformers(
         )
         model.to(device_override)
     else:
-        model = AutoModelForSeq2SeqLM.from_pretrained(
-            model_id,
-            torch_dtype=dtype,
-            device_map="auto"
-        )
+        try:
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                device_map="auto"
+            )
+        except Exception:
+            device = select_asr_device(device_env)
+            model = AutoModelForSeq2SeqLM.from_pretrained(
+                model_id,
+                torch_dtype=dtype,
+                device_map=None
+            )
+            model.to(device)
     return model, processor
