@@ -49,12 +49,36 @@ timing after a word is found in the transcript index.
 
 ## Setup
 
+Recommended (uv, reproducible + isolated):
 ```bash
-# Clone and install
-pip install pydub opencc-python-reimplemented webvtt-py feedparser requests yt-dlp
+# Install uv (once)
+python -m pip install --user uv
 
-# For podcast ASR (required for indexing). Default backend is Fun-ASR-Nano.
-# If you want whisper.cpp instead:
+# Create local venv + install base deps
+~/.local/bin/uv venv
+~/.local/bin/uv sync
+
+# Optional: ASR stack (Fun-ASR-Nano, GLM-ASR, WhisperX alignment)
+~/.local/bin/uv sync --extra asr
+
+# Optional: MLX + Qwen3-Omni (Apple Silicon)
+~/.local/bin/uv sync --extra mlx
+```
+
+Then run commands with:
+```bash
+~/.local/bin/uv run python audio_vocab_miner.py index --sources sources.txt --db vocab.db
+```
+
+If you prefer pip:
+```bash
+python -m venv .venv
+source .venv/bin/activate
+pip install -e ".[asr,mlx]"
+```
+
+For podcast ASR with whisper.cpp instead:
+```bash
 brew install whisper-cpp
 # Download large-v3 model (~3GB)
 curl -L -o models/ggml-large-v3.bin \
@@ -70,17 +94,13 @@ unzip models/ggml-large-v3-encoder.mlmodelc.zip -d models/
 
 ### Alternative ASR Backends
 
-**Fun-ASR-Nano** (800M params, Chinese + dialects):
+**Fun-ASR-Nano** (800M params, Chinese + dialects) + **GLM-ASR** (transformers, 1.5B params):
 ```bash
-pip install funasr
+~/.local/bin/uv sync --extra asr
 ```
+The lockfile pins Transformers from git to ensure GLM-ASR's `glmasr` architecture is supported.
 First run downloads the Fun-ASR-Nano weights plus the Qwen3-0.6B LLM weights.
 
-**GLM-ASR** (local transformers, 1.5B params):
-```bash
-pip install git+https://github.com/huggingface/transformers.git
-pip install accelerate
-```
 If your Python build is missing `_lzma` (common with pyenv), install xz headers
 and then:
 ```bash
@@ -88,11 +108,14 @@ brew install xz
 CFLAGS="-I/opt/homebrew/opt/xz/include" LDFLAGS="-L/opt/homebrew/opt/xz/lib" \
   pip install backports.lzma
 ```
+
 Set device/dtype via env vars, e.g. `GLM_ASR_DEVICE=mps` or `GLM_ASR_DTYPE=float16`.
 Use `GLM_ASR_PREFER_ENDPOINT=1` with `--glm-endpoint` to target an OpenAI-compatible
 `/audio/transcriptions` server.
 
 ## Usage
+
+If using uv, either activate `.venv` or prefix commands with `~/.local/bin/uv run`.
 
 ```bash
 # Index sources (YouTube + podcasts). Podcasts are fully transcribed.

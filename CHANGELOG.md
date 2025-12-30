@@ -9,10 +9,12 @@ Completed work and key snapshots.
 - Podcast ASR pipeline: chunked ASR, whisper.cpp + CoreML option, mlx-whisper benchmarked, Fun-ASR-Nano + GLM-ASR backends, MMS_FA forced alignment for timestamps, transcript caching in SQLite.
 - Clip generation: ffmpeg extraction, cloze silencing, clip merge across runs, HTML review UI.
 - Eval report with WhisperX alignment highlighting.
+- Reproducible Python tooling via `pyproject.toml` + `uv.lock` (extras for ASR + MLX).
 
 ### Fixed / stabilized
 - Fun-ASR-Nano: Qwen3 weight bootstrap + transformers `load_in_8bit` patch.
 - GLM-ASR: local transformers path via AutoProcessor + AutoModelForSeq2SeqLM (endpoint mode optional).
+- GLM-ASR setup docs now pin transformers from git to avoid `glmasr` architecture errors.
 
 ### Evaluation snapshot (2025-12-30)
 Ran ASR accuracy benchmarks on 30 samples (18 YouTube + 12 podcast):

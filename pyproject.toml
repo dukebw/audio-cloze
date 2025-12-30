@@ -1,0 +1,43 @@
+[project]
+name = "audio-cloze"
+version = "0.1.0"
+description = "Mine Chinese vocabulary from YouTube and podcasts, generate audio cloze cards for Anki."
+readme = "README.md"
+requires-python = ">=3.10"
+
+dependencies = [
+  "pydub>=0.25.1",
+  "opencc-python-reimplemented>=0.1.7",
+  "webvtt-py>=0.4.6",
+  "feedparser>=6.0.11",
+  "requests>=2.31.0",
+  "yt-dlp>=2024.8.6",
+]
+
+[project.optional-dependencies]
+# Core ASR stack (Fun-ASR-Nano, GLM-ASR, WhisperX alignment)
+# transformers is pinned to the main branch to ensure GLM-ASR architecture support.
+asr = [
+  "torch>=2.2",
+  "torchaudio>=2.2",
+  "transformers @ git+https://github.com/huggingface/transformers.git",
+  "accelerate>=0.28.0",
+  "funasr>=1.1.10",
+  "whisperx>=3.1.1",
+]
+
+# MLX + Qwen3-Omni path (Apple Silicon)
+mlx = [
+  "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git",
+  "librosa>=0.10.2",
+  "soundfile>=0.12.1",
+]
+
+# Development tooling
+dev = [
+  "ruff>=0.6.4",
+]
+
+[tool.uv]
+# Keep uv.lock in the repo for reproducible installs.
+required-version = ">=0.5"
