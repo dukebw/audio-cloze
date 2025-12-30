@@ -35,10 +35,16 @@ DEFAULT_AUDIO_SUBDIR = "audio"
 EP499_SAMPLE_START = 610  # contains "留下兩個懸念" in EP499 TAXI DRIVER
 RESULTS_FILE = EVAL_DIR / "eval_results.json"
 HTML_FILE = EVAL_DIR / "eval_compare.html"
+WHISPERX_METHOD = "whisperx"
+DEFAULT_ALIGNMENT_ORDER = (WHISPERX_METHOD,)
 
 _FUNASR_MODEL = None
 _GLM_ASR_MODEL = None
 _GLM_ASR_PROCESSOR = None
+_WHISPERX_ALIGN_MODEL = None
+_WHISPERX_ALIGN_META = None
+_WHISPERX_PATCHED = False
+_STABLE_TS_MODEL = None
 
 
 @dataclass
@@ -63,6 +69,7 @@ class TranscriptionResult:
     word_count: int
     audio_duration: float = SAMPLE_DURATION  # For realtime calculation
     error: Optional[str] = None
+    alignments: Optional[dict] = None
 
     @property
     def realtime_speed(self) -> float:
@@ -336,6 +343,359 @@ def convert_to_wav(mp3_path: Path) -> Path:
     return wav_path
 
 
+# =============================================================================
+# Alignment helpers (for eval_compare.html highlighting)
+# =============================================================================
+
+def _is_chinese(char: str) -> bool:
+    return "\u4e00" <= char <= "\u9fff"
+
+
+def _parse_timestamp(value: str) -> Optional[float]:
+    if not value:
+        return None
+    try:
+        parts = value.split(",")
+        hms = parts[0].split(":")
+        if len(hms) != 3:
+            return None
+        hours = int(hms[0])
+        minutes = int(hms[1])
+        seconds = int(hms[2])
+        millis = int(parts[1]) if len(parts) > 1 else 0
+        return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
+    except Exception:
+        return None
+
+
+def _parse_whispercpp_json(json_path: Path) -> tuple[str, list[dict]]:
+    data = json.loads(json_path.read_text(encoding="utf-8", errors="replace"))
+    segments = data.get("transcription", []) or data.get("segments", [])
+    text = "".join(seg.get("text", "") for seg in segments).strip()
+    tokens: list[dict] = []
+    for seg in segments:
+        for tok in seg.get("tokens", []) or []:
+            token_text = tok.get("text", "")
+            if not token_text:
+                continue
+            stripped = token_text.strip()
+            if stripped.startswith("[_") or stripped.startswith("<|") or (stripped.startswith("[") and stripped.endswith("]")):
+                continue
+            if "�" in stripped:
+                continue
+            offsets = tok.get("offsets") or {}
+            start_ms = offsets.get("from")
+            end_ms = offsets.get("to")
+            if start_ms is None or end_ms is None:
+                timestamps = tok.get("timestamps") or {}
+                start = _parse_timestamp(timestamps.get("from"))
+                end = _parse_timestamp(timestamps.get("to"))
+            else:
+                start = start_ms / 1000.0
+                end = end_ms / 1000.0
+            tokens.append({
+                "text": token_text,
+                "start": start,
+                "end": end,
+                "score": tok.get("p"),
+            })
+    return text, tokens
+
+
+def _load_audio_mono_16k(audio_path: Path):
+    import torch
+    import torchaudio
+    try:
+        waveform, sr = torchaudio.load(str(audio_path))
+    except Exception:
+        from pydub import AudioSegment
+        audio = AudioSegment.from_file(str(audio_path))
+        audio = audio.set_frame_rate(16000).set_channels(1)
+        samples = audio.get_array_of_samples()
+        try:
+            import numpy as np
+            arr = np.array(samples, dtype="float32") / 32768.0
+            waveform = torch.from_numpy(arr).unsqueeze(0)
+        except Exception:
+            waveform = torch.tensor(samples, dtype=torch.float32).unsqueeze(0) / 32768.0
+        sr = 16000
+    if sr != 16000:
+        waveform = torchaudio.functional.resample(waveform, sr, 16000)
+    if waveform.shape[0] > 1:
+        waveform = waveform.mean(dim=0, keepdim=True)
+    return waveform
+
+
+def _init_whisperx():
+    global _WHISPERX_PATCHED
+    import os as _os
+    import numpy as _np
+    import torch as _torch
+    import typing as _typing
+    import collections as _collections
+    from omegaconf import listconfig, dictconfig, base, nodes as oc_nodes
+    from transformers import Wav2Vec2ForCTC, Wav2Vec2Processor
+
+    _os.environ.setdefault("TORCH_FORCE_WEIGHTS_ONLY_LOAD", "0")
+    if not hasattr(_np, "NaN"):
+        _np.NaN = _np.nan
+    if not _WHISPERX_PATCHED:
+        safe_nodes = [v for v in vars(oc_nodes).values() if isinstance(v, type)]
+        try:
+            _torch.serialization.add_safe_globals([
+                listconfig.ListConfig,
+                dictconfig.DictConfig,
+                base.ContainerMetadata,
+                _typing.Any,
+                list,
+                dict,
+                tuple,
+                set,
+                _collections.defaultdict,
+                int,
+                float,
+                str,
+                bool,
+                _torch.torch_version.TorchVersion,
+            ] + safe_nodes)
+        except Exception:
+            pass
+        orig_load = _torch.load
+
+        def _patched_load(*args, **kwargs):
+            kwargs.setdefault("weights_only", False)
+            return orig_load(*args, **kwargs)
+
+        _torch.load = _patched_load
+
+        orig_from_pretrained = Wav2Vec2ForCTC.from_pretrained
+
+        def _safe_from_pretrained(*args, **kwargs):
+            kwargs.setdefault("use_safetensors", True)
+            return orig_from_pretrained(*args, **kwargs)
+
+        Wav2Vec2ForCTC.from_pretrained = _safe_from_pretrained
+
+        if not hasattr(Wav2Vec2Processor, "sampling_rate"):
+            def _sampling_rate(self):
+                fe = getattr(self, "feature_extractor", None)
+                return getattr(fe, "sampling_rate", None)
+            Wav2Vec2Processor.sampling_rate = property(_sampling_rate)
+        _WHISPERX_PATCHED = True
+
+
+def _mms_char_tokens(audio_path: Path, transcript: str) -> list[dict]:
+    tokens = [{"text": c, "start": None, "end": None, "score": None} for c in transcript]
+    try:
+        import torch
+        import torchaudio
+        from torchaudio.pipelines import MMS_FA
+    except ImportError as e:
+        raise RuntimeError(f"missing deps: {e}")
+
+    waveform = _load_audio_mono_16k(audio_path)
+    device = "cpu"
+    bundle = MMS_FA
+    model = bundle.get_model().to(device)
+    with torch.no_grad():
+        emission, _ = model(waveform.to(device))
+    dictionary = bundle.get_dict()
+    unk_id = dictionary.get("<unk>")
+    align_indices = []
+    token_ids = []
+    for i, c in enumerate(transcript):
+        if not _is_chinese(c):
+            continue
+        token_id = dictionary.get(c.lower())
+        if token_id is None:
+            if unk_id is None or unk_id == 0:
+                continue
+            token_id = unk_id
+        if token_id == 0:
+            continue
+        align_indices.append(i)
+        token_ids.append(token_id)
+    if not token_ids:
+        return tokens
+    targets = torch.tensor([token_ids], dtype=torch.int32, device=device)
+    alignments, scores = torchaudio.functional.forced_align(emission, targets, blank=0)
+    num_frames = emission.shape[1]
+    audio_duration = waveform.shape[1] / 16000
+    frame_duration = audio_duration / num_frames if num_frames else 0.0
+    alignments = alignments[0].cpu().tolist()
+    scores = scores[0].cpu().tolist()
+    char_idx = 0
+    for i, (token_id, score) in enumerate(zip(alignments, scores)):
+        if token_id != 0 and char_idx < len(align_indices):
+            idx = align_indices[char_idx]
+            tokens[idx]["start"] = i * frame_duration
+            tokens[idx]["end"] = (i + 1) * frame_duration
+            tokens[idx]["score"] = score
+            char_idx += 1
+    return tokens
+
+
+def _mms_pinyin_tokens(audio_path: Path, transcript: str) -> list[dict]:
+    tokens = [{"text": c, "start": None, "end": None, "score": None} for c in transcript]
+    align_indices = [i for i, c in enumerate(transcript) if _is_chinese(c)]
+    align_chars = [transcript[i] for i in align_indices]
+    if not align_chars:
+        return tokens
+    try:
+        import torch
+        import torchaudio
+        from torchaudio.pipelines import MMS_FA
+        from pypinyin import pinyin, Style
+    except ImportError as e:
+        raise RuntimeError(f"missing deps: {e}")
+
+    pinyin_tokens = []
+    for c in align_chars:
+        py = pinyin(c, style=Style.NORMAL, strict=False, errors="ignore")
+        if not py:
+            pinyin_tokens.append("")
+        else:
+            pinyin_tokens.append(py[0][0])
+
+    waveform = _load_audio_mono_16k(audio_path)
+    device = "cpu"
+    bundle = MMS_FA
+    model = bundle.get_model().to(device)
+    tokenizer = bundle.get_tokenizer()
+    aligner = bundle.get_aligner()
+    with torch.no_grad():
+        emission, _ = model(waveform.to(device))
+    tokenized = tokenizer(pinyin_tokens)
+    spans = aligner(emission[0], tokenized)
+    ratio = waveform.shape[1] / emission.shape[1] / 16000
+    for j, span_item in enumerate(spans):
+        if j >= len(align_indices):
+            break
+        if isinstance(span_item, list):
+            if not span_item:
+                continue
+            start_span = span_item[0]
+            end_span = span_item[-1]
+        else:
+            start_span = span_item
+            end_span = span_item
+        idx = align_indices[j]
+        tokens[idx]["start"] = float(start_span.start * ratio)
+        tokens[idx]["end"] = float(end_span.end * ratio)
+        tokens[idx]["score"] = float(getattr(end_span, "score", 0.0))
+    return tokens
+
+
+def _whisperx_tokens(audio_path: Path, transcript: str) -> list[dict]:
+    try:
+        _init_whisperx()
+        import whisperx
+    except Exception as e:
+        raise RuntimeError(f"missing deps: {e}")
+    global _WHISPERX_ALIGN_MODEL, _WHISPERX_ALIGN_META
+    device = "cpu"
+    if _WHISPERX_ALIGN_MODEL is None or _WHISPERX_ALIGN_META is None:
+        _WHISPERX_ALIGN_MODEL, _WHISPERX_ALIGN_META = whisperx.load_align_model(
+            language_code="zh",
+            device=device,
+        )
+    audio = whisperx.load_audio(str(audio_path))
+    duration = audio.shape[0] / whisperx.audio.SAMPLE_RATE
+    segments = [{"start": 0.0, "end": float(duration), "text": transcript}]
+    result = whisperx.align(
+        segments,
+        _WHISPERX_ALIGN_MODEL,
+        _WHISPERX_ALIGN_META,
+        audio,
+        device,
+        return_char_alignments=True,
+    )
+    tokens: list[dict] = []
+    for seg in result.get("segments", []):
+        chars = seg.get("chars") or []
+        if chars:
+            for ch in chars:
+                tokens.append({
+                    "text": ch.get("char") or ch.get("text") or "",
+                    "start": ch.get("start"),
+                    "end": ch.get("end"),
+                    "score": ch.get("score"),
+                })
+        else:
+            for word in seg.get("words", []) or []:
+                tokens.append({
+                    "text": word.get("word", ""),
+                    "start": word.get("start"),
+                    "end": word.get("end"),
+                    "score": word.get("score") or word.get("probability"),
+                })
+    return tokens
+
+
+def _stable_ts_tokens(audio_path: Path, transcript: str) -> list[dict]:
+    try:
+        import stable_whisper
+    except Exception as e:
+        raise RuntimeError(f"missing deps: {e}")
+    global _STABLE_TS_MODEL
+    if _STABLE_TS_MODEL is None:
+        _STABLE_TS_MODEL = stable_whisper.load_model("base")
+    try:
+        result = _STABLE_TS_MODEL.align(str(audio_path), transcript, "Chinese")
+    except Exception:
+        result = _STABLE_TS_MODEL.align(str(audio_path), transcript, "zh")
+    data = result.to_dict() if hasattr(result, "to_dict") else result
+    tokens: list[dict] = []
+    for seg in data.get("segments", []) if isinstance(data, dict) else []:
+        for word in seg.get("words", []) or []:
+            tokens.append({
+                "text": word.get("word", ""),
+                "start": word.get("start"),
+                "end": word.get("end"),
+                "score": word.get("probability") or word.get("score"),
+            })
+    return tokens
+
+
+def _round_tokens(tokens: list[dict], ndigits: int = 3) -> list[dict]:
+    rounded = []
+    for tok in tokens:
+        item = dict(tok)
+        if isinstance(item.get("start"), (int, float)):
+            item["start"] = round(float(item["start"]), ndigits)
+        if isinstance(item.get("end"), (int, float)):
+            item["end"] = round(float(item["end"]), ndigits)
+        if isinstance(item.get("score"), (int, float)):
+            item["score"] = round(float(item["score"]), ndigits)
+        rounded.append(item)
+    return rounded
+
+
+def compute_alignments(audio_path: Path, transcript: str) -> dict:
+    results: dict = {}
+    try:
+        tokens = _whisperx_tokens(audio_path, transcript)
+        tokens = _round_tokens(tokens)
+        if tokens:
+            results[WHISPERX_METHOD] = {"status": "ok", "error": None, "tokens": tokens}
+        else:
+            results[WHISPERX_METHOD] = {"status": "error", "error": "no tokens", "tokens": []}
+    except Exception as e:
+        results[WHISPERX_METHOD] = {"status": "error", "error": str(e), "tokens": []}
+    return results
+
+
+def choose_default_alignment(alignments: dict) -> Optional[str]:
+    for name in DEFAULT_ALIGNMENT_ORDER:
+        entry = alignments.get(name)
+        if entry and entry.get("status") == "ok" and entry.get("tokens"):
+            return name
+    for name, entry in alignments.items():
+        if entry.get("status") == "ok" and entry.get("tokens"):
+            return name
+    return None
+
+
 def transcribe_whisper_cpp(audio_path: Path) -> TranscriptionResult:
     """Transcribe with whisper.cpp."""
     if not WHISPER_MODEL_PATH.exists():
@@ -351,7 +711,7 @@ def transcribe_whisper_cpp(audio_path: Path) -> TranscriptionResult:
             "-m", str(WHISPER_MODEL_PATH),
             "-l", "zh",
             "-t", "8", "-p", "4",
-            "-oj",  # JSON output
+            "-ojf",  # Full JSON output with token timestamps
             "-of", str(output_base),
             str(wav_path)
         ]
@@ -360,16 +720,15 @@ def transcribe_whisper_cpp(audio_path: Path) -> TranscriptionResult:
 
         json_file = Path(str(output_base) + ".json")
         if json_file.exists():
-            data = json.loads(json_file.read_text(encoding='utf-8', errors='replace'))
-            # Extract text from transcription segments
-            segments = data.get("transcription", [])
-            text = "".join(seg.get("text", "") for seg in segments).strip()
+            text, _ = _parse_whispercpp_json(json_file)
+            alignments = None
             json_file.unlink()
         else:
             text = ""
+            alignments = None
 
         wav_path.unlink(missing_ok=True)
-        return TranscriptionResult("whisper-large-v3", text, elapsed, len(text))
+        return TranscriptionResult("whisper-large-v3", text, elapsed, len(text), alignments=alignments)
 
     except Exception as e:
         wav_path.unlink(missing_ok=True)
@@ -388,11 +747,12 @@ def transcribe_mlx_whisper(audio_path: Path) -> TranscriptionResult:
         result = mlx_whisper.transcribe(
             str(audio_path),
             path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
-            language="zh"
+            language="zh",
+            word_timestamps=True,
         )
         elapsed = time.time() - start
         text = result.get("text", "").strip()
-        return TranscriptionResult("mlx-whisper", text, elapsed, len(text))
+        return TranscriptionResult("mlx-whisper", text, elapsed, len(text), alignments=None)
     except Exception as e:
         return TranscriptionResult("mlx-whisper", "", time.time() - start, 0, error=str(e))
 
@@ -701,6 +1061,16 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
             white-space: pre-wrap;
             word-break: break-all;
         }
+        .token {
+            padding: 0 1px;
+            border-radius: 4px;
+        }
+        .token.active {
+            background: #ffe08a;
+        }
+        .token.no-time {
+            color: #777;
+        }
         .error { color: #f44336; font-style: italic; }
         .rating-buttons {
             display: flex;
@@ -835,11 +1205,23 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
             tr = result.transcriptions.get(backend)
             if tr is None:
                 tr = TranscriptionResult(backend, "", 0, 0, error="Not run")
+            alignment_data_html = ""
+            text_html = ""
             if tr.error:
                 text_html = f'<span class="error">Error: {html_lib.escape(tr.error)}</span>'
             else:
-                safe_text = html_lib.escape(tr.text)
-                text_html = safe_text if safe_text else '<span class="error">No transcription</span>'
+                alignments = tr.alignments or {}
+                default_alignment = None
+                if alignments:
+                    default_alignment = choose_default_alignment(alignments)
+                if alignments and default_alignment:
+                    payload = {"default": default_alignment, "methods": alignments}
+                    payload_json = json.dumps(payload, ensure_ascii=False).replace("</", "<\\/")
+                    alignment_data_html = f'<script type="application/json" class="alignment-data">{payload_json}</script>'
+                    text_html = '<span class="error">Loading alignment…</span>'
+                else:
+                    safe_text = html_lib.escape(tr.text)
+                    text_html = safe_text if safe_text else '<span class="error">No transcription</span>'
 
             speed_str = f"{tr.realtime_speed:.1f}x RT" if tr.realtime_speed > 0 else "N/A"
             label = backend_labels.get(backend, backend)
@@ -850,6 +1232,7 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
                         <span class="backend-time">{tr.elapsed_seconds:.1f}s ({speed_str}) • {tr.word_count} chars</span>
                     </div>
                     <div class="transcription-text">{text_html}</div>
+                    {alignment_data_html}
                     <div class="rating-buttons">
                         <button class="rating-btn" onclick="rate({i}, '{backend}', 'good')">Good</button>
                         <button class="rating-btn" onclick="rate({i}, '{backend}', 'ok')">OK</button>
@@ -955,6 +1338,96 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
             `}).join('');
         }
 
+        function escapeHtml(text) {
+            return String(text || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/\"/g, '&quot;')
+                .replace(/'/g, '&#039;');
+        }
+
+        function buildTokensHtml(tokens) {
+            return (tokens || []).map(tok => {
+                const text = escapeHtml(tok.text);
+                const start = tok.start;
+                const end = tok.end;
+                if (start !== null && start !== undefined && end !== null && end !== undefined) {
+                    return `<span class="token" data-start="${start}" data-end="${end}">${text}</span>`;
+                }
+                return `<span class="token no-time">${text}</span>`;
+            }).join('');
+        }
+
+        function renderAlignment(trEl, method) {
+            const payload = trEl._alignmentData;
+            const textEl = trEl.querySelector('.transcription-text');
+            if (!payload || !textEl) return;
+            const entry = payload.methods ? payload.methods[method] : null;
+            if (!entry || entry.status !== 'ok' || !entry.tokens || entry.tokens.length === 0) {
+                textEl.innerHTML = '<span class="error">Alignment not available</span>';
+                textEl.dataset.alignEnabled = 'false';
+                textEl.dataset.activeIndex = '';
+                return;
+            }
+            textEl.innerHTML = buildTokensHtml(entry.tokens);
+            textEl.dataset.alignEnabled = 'true';
+            textEl.dataset.activeIndex = '';
+        }
+
+        function highlightSample(sampleEl, currentTime) {
+            sampleEl.querySelectorAll('.transcription-text[data-align-enabled="true"]').forEach(textEl => {
+                const tokens = textEl.querySelectorAll('.token[data-start]');
+                if (!tokens.length) return;
+                let activeIndex = -1;
+                for (let i = 0; i < tokens.length; i++) {
+                    const start = parseFloat(tokens[i].dataset.start);
+                    const end = parseFloat(tokens[i].dataset.end);
+                    if (currentTime >= start && currentTime < end) {
+                        activeIndex = i;
+                        break;
+                    }
+                }
+                const prev = parseInt(textEl.dataset.activeIndex || '-1', 10);
+                if (prev === activeIndex) return;
+                if (prev >= 0 && tokens[prev]) {
+                    tokens[prev].classList.remove('active');
+                }
+                if (activeIndex >= 0 && tokens[activeIndex]) {
+                    tokens[activeIndex].classList.add('active');
+                }
+                textEl.dataset.activeIndex = String(activeIndex);
+            });
+        }
+
+        function initAlignments() {
+            document.querySelectorAll('.transcription').forEach(trEl => {
+                const dataEl = trEl.querySelector('script.alignment-data');
+                if (!dataEl) return;
+                let payload = null;
+                try {
+                    payload = JSON.parse(dataEl.textContent);
+                } catch (e) {
+                    return;
+                }
+                trEl._alignmentData = payload;
+                const defaultMethod = payload.default;
+                if (defaultMethod) {
+                    renderAlignment(trEl, defaultMethod);
+                }
+            });
+
+            document.querySelectorAll('.sample').forEach(sampleEl => {
+                const audio = sampleEl.querySelector('audio');
+                if (!audio) return;
+                const handler = () => highlightSample(sampleEl, audio.currentTime || 0);
+                audio.addEventListener('timeupdate', handler);
+                audio.addEventListener('seeked', handler);
+                audio.addEventListener('play', handler);
+                audio.addEventListener('loadedmetadata', handler);
+            });
+        }
+
         function exportRatings() {
             const data = JSON.stringify({ratings, benchmarkStats}, null, 2);
             const blob = new Blob([data], { type: 'application/json' });
@@ -965,6 +1438,7 @@ def generate_html_report(results: list[EvalResult], backend_specs: list[BackendS
             a.click();
         }
 
+        initAlignments();
         // Initial summary
         updateSummary();
     </script>
@@ -984,6 +1458,14 @@ def run_transcriptions(
     for spec in backend_specs:
         existing_tr = transcriptions.get(spec.key)
         if existing_tr and not existing_tr.error:
+            if existing_tr.text:
+                needs_alignment = (
+                    not existing_tr.alignments
+                    or set(existing_tr.alignments.keys()) != {WHISPERX_METHOD}
+                )
+                if needs_alignment:
+                    existing_tr.alignments = compute_alignments(audio_path, existing_tr.text)
+            transcriptions[spec.key] = existing_tr
             continue
         print(f"  Transcribing with {spec.label}...")
         tr = spec.transcribe(audio_path)
@@ -992,6 +1474,8 @@ def run_transcriptions(
             print(f"    -> ERROR: {tr.error}")
         else:
             print(f"    -> {tr.elapsed_seconds:.1f}s, {tr.word_count} chars")
+        if not tr.error and tr.text:
+            tr.alignments = compute_alignments(audio_path, tr.text)
         transcriptions[spec.key] = tr
     return transcriptions
 
