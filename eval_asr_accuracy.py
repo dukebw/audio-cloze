@@ -1184,50 +1184,6 @@ def generate_html_report(
             color: #777;
         }
         .error { color: #f44336; font-style: italic; }
-        .rating-buttons {
-            display: flex;
-            gap: 5px;
-            margin-top: 10px;
-        }
-        .rating-btn {
-            padding: 5px 10px;
-            border: 1px solid #ddd;
-            background: white;
-            border-radius: 4px;
-            cursor: pointer;
-            font-size: 12px;
-        }
-        .rating-btn:hover { background: #f0f0f0; }
-        .rating-btn.selected { background: #4CAF50; color: white; border-color: #4CAF50; }
-        .rating-btn.selected.poor { background: #f44336; border-color: #f44336; }
-        .rating-btn.selected.ok { background: #ff9800; border-color: #ff9800; }
-        .summary-table {
-            width: 100%;
-            border-collapse: collapse;
-            margin: 20px 0;
-            background: white;
-            border-radius: 8px;
-            overflow: hidden;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        .summary-table th, .summary-table td {
-            padding: 12px 15px;
-            text-align: left;
-            border-bottom: 1px solid #eee;
-        }
-        .summary-table th { background: #f5f5f5; font-weight: 600; }
-        .export-btn {
-            display: block;
-            margin: 20px auto;
-            padding: 12px 24px;
-            background: #4CAF50;
-            color: white;
-            border: none;
-            border-radius: 8px;
-            font-size: 16px;
-            cursor: pointer;
-        }
-        .export-btn:hover { background: #45a049; }
     </style>
 </head>
 <body>
@@ -1350,11 +1306,6 @@ def generate_html_report(
                     </div>
                     <div class="transcription-text">{text_html}</div>
                     {alignment_data_html}
-                    <div class="rating-buttons">
-                        <button class="rating-btn" onclick="rate({i}, '{backend}', 'good')">Good</button>
-                        <button class="rating-btn" onclick="rate({i}, '{backend}', 'ok')">OK</button>
-                        <button class="rating-btn" onclick="rate({i}, '{backend}', 'poor')">Poor</button>
-                    </div>
                 </div>
 '''
         html += '''
@@ -1365,32 +1316,7 @@ def generate_html_report(
     html += '''
     </div>
 
-    <h2 class="section-title">Your Ratings Summary</h2>
-    <table class="summary-table">
-        <thead>
-            <tr>
-                <th>Backend</th>
-                <th>Avg Speed</th>
-                <th>Avg Chars</th>
-                <th>Errors</th>
-                <th>Good</th>
-                <th>OK</th>
-                <th>Poor</th>
-            </tr>
-        </thead>
-        <tbody id="summary-body">
-        </tbody>
-    </table>'''
-
-    html += '''
-
-    <button class="export-btn" onclick="exportRatings()">Export Ratings (JSON)</button>
-
     <script>
-        const ratings = {};
-        const backends = ''' + json.dumps(backend_keys) + ''';
-        const backendLabels = ''' + json.dumps(backend_labels) + ''';
-        const benchmarkStats = ''' + json.dumps(benchmark_stats) + ''';
 
         function filterSamples(type) {
             document.querySelectorAll('.filter-btn').forEach(btn => btn.classList.remove('active'));
@@ -1403,56 +1329,6 @@ def generate_html_report(
                     sample.style.display = 'none';
                 }
             });
-        }
-
-        function rate(sampleId, backend, rating) {
-            const key = `${sampleId}-${backend}`;
-            ratings[key] = rating;
-
-            // Update button styles
-            const btns = document.querySelectorAll(`#sample-${sampleId} [data-backend="${backend}"] .rating-btn`);
-            btns.forEach(btn => {
-                btn.classList.remove('selected', 'poor', 'ok');
-                if (btn.textContent.includes(rating === 'good' ? 'Good' : rating === 'ok' ? 'OK' : 'Poor')) {
-                    btn.classList.add('selected');
-                    if (rating === 'poor') btn.classList.add('poor');
-                    if (rating === 'ok') btn.classList.add('ok');
-                }
-            });
-
-            updateSummary();
-        }
-
-        function updateSummary() {
-            const counts = {};
-            backends.forEach(b => {
-                counts[b] = { good: 0, ok: 0, poor: 0 };
-            });
-
-            Object.entries(ratings).forEach(([key, rating]) => {
-                const backend = key.split('-').slice(1).join('-');
-                if (counts[backend]) {
-                    counts[backend][rating]++;
-                }
-            });
-
-            const tbody = document.getElementById('summary-body');
-            tbody.innerHTML = backends.map(b => {
-                const stats = benchmarkStats[b] || {};
-                const avgSpeed = stats.avg_speed ? stats.avg_speed.toFixed(1) + 'x' : '-';
-                const avgChars = stats.avg_chars ? Math.round(stats.avg_chars) : '-';
-                const errors = stats.errors !== undefined ? stats.errors : '-';
-                return `
-                <tr>
-                    <td>${backendLabels[b] || b}</td>
-                    <td>${avgSpeed}</td>
-                    <td>${avgChars}</td>
-                    <td>${errors}</td>
-                    <td>${counts[b].good}</td>
-                    <td>${counts[b].ok}</td>
-                    <td>${counts[b].poor}</td>
-                </tr>
-            `}).join('');
         }
 
         function escapeHtml(text) {
@@ -1545,19 +1421,7 @@ def generate_html_report(
             });
         }
 
-        function exportRatings() {
-            const data = JSON.stringify({ratings, benchmarkStats}, null, 2);
-            const blob = new Blob([data], { type: 'application/json' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url;
-            a.download = 'asr_ratings.json';
-            a.click();
-        }
-
         initAlignments();
-        // Initial summary
-        updateSummary();
     </script>
 </body>
 </html>
