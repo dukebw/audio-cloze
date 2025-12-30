@@ -17,6 +17,7 @@ from asr_utils import (
     ensure_qwen3_weights,
     load_glm_asr_transformers,
     patch_funasr_load_in_8bit,
+    resolve_torch_dtype,
     select_asr_device,
 )
 
@@ -30,6 +31,9 @@ NUM_JP_SAMPLES = 10
 WHISPER_MODEL_PATH = Path(__file__).parent / "models" / "ggml-large-v3.bin"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
+QWEN3_OMNI_MLX_MODEL_ID = "mlx-community/Qwen3-Omni-30B-A3B-Instruct-8bit"
+QWEN3_OMNI_MODEL_ID = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
+QWEN3_OMNI_PROMPT_ZH = "请将这段中文语音转换为纯文本。"
 DEFAULT_EVAL_DIR = Path(__file__).parent / "eval_samples"
 JP_EVAL_SUBDIR = "jp_4w0bjx3L_gw"
 JP_VIDEO_ID = "4w0bjx3L_gw"
@@ -48,6 +52,11 @@ FUNASR_LANGUAGE = "中文"
 _FUNASR_MODEL = None
 _GLM_ASR_MODEL = None
 _GLM_ASR_PROCESSOR = None
+_QWEN3_OMNI_MLX_MODEL = None
+_QWEN3_OMNI_MLX_PROCESSOR = None
+_QWEN3_OMNI_MLX_CONFIG = None
+_QWEN3_OMNI_TORCH_MODEL = None
+_QWEN3_OMNI_TORCH_PROCESSOR = None
 _WHISPERX_ALIGN_MODEL = None
 _WHISPERX_ALIGN_META = None
 _WHISPERX_ALIGN_LANGUAGE = None
@@ -726,10 +735,214 @@ def transcribe_glm_asr(audio_path: Path) -> TranscriptionResult:
         return TranscriptionResult("glm-asr", "", time.time() - start, 0, error=str(e))
 
 
+def qwen3_omni_prompt() -> str:
+    override = os.environ.get("QWEN3_OMNI_PROMPT")
+    if override:
+        return override
+    if EVAL_LANGUAGE == "zh":
+        return QWEN3_OMNI_PROMPT_ZH
+    return "Please transcribe the audio into text."
+
+
+def qwen3_omni_max_new_tokens() -> int:
+    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", "512"))
+
+
+def _extract_sequences(outputs):
+    if isinstance(outputs, (list, tuple)):
+        outputs = outputs[0]
+    if hasattr(outputs, "sequences"):
+        return outputs.sequences
+    return outputs
+
+
+def _load_qwen3_omni_mlx():
+    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR, _QWEN3_OMNI_MLX_CONFIG
+    if _QWEN3_OMNI_MLX_MODEL is None or _QWEN3_OMNI_MLX_PROCESSOR is None:
+        from mlx_vlm import load as mlx_load
+        try:
+            from mlx_vlm.utils import load_config as mlx_load_config
+        except Exception:
+            mlx_load_config = None
+        model, processor = mlx_load(QWEN3_OMNI_MLX_MODEL_ID)
+        config = None
+        if mlx_load_config is not None:
+            try:
+                config = mlx_load_config(QWEN3_OMNI_MLX_MODEL_ID)
+            except Exception:
+                config = getattr(model, "config", None)
+        else:
+            config = getattr(model, "config", None)
+        _QWEN3_OMNI_MLX_MODEL = model
+        _QWEN3_OMNI_MLX_PROCESSOR = processor
+        _QWEN3_OMNI_MLX_CONFIG = config
+    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR, _QWEN3_OMNI_MLX_CONFIG
+
+
+def _transcribe_qwen3_omni_mlx(audio_path: Path) -> str:
+    model, processor, config = _load_qwen3_omni_mlx()
+    from mlx_vlm import generate as mlx_generate
+    from mlx_vlm.prompt_utils import apply_chat_template
+
+    prompt = qwen3_omni_prompt()
+    try:
+        formatted = apply_chat_template(processor, config, prompt, num_audios=1)
+    except TypeError:
+        formatted = apply_chat_template(processor, prompt, num_audios=1)
+
+    audio = [str(audio_path)]
+    max_tokens = qwen3_omni_max_new_tokens()
+    try:
+        output = mlx_generate(
+            model,
+            processor,
+            formatted,
+            audio=audio,
+            max_tokens=max_tokens,
+            verbose=False
+        )
+    except TypeError:
+        output = mlx_generate(
+            model,
+            processor,
+            formatted,
+            audio=audio,
+            verbose=False
+        )
+    if isinstance(output, (list, tuple)):
+        output = output[0]
+    return str(output).strip()
+
+
+def _load_qwen3_omni_torch():
+    global _QWEN3_OMNI_TORCH_MODEL, _QWEN3_OMNI_TORCH_PROCESSOR
+    if _QWEN3_OMNI_TORCH_MODEL is None or _QWEN3_OMNI_TORCH_PROCESSOR is None:
+        try:
+            from transformers import Qwen3OmniMoeForConditionalGeneration, Qwen3OmniMoeProcessor
+        except Exception:
+            from transformers import AutoModelForCausalLM, AutoProcessor
+            Qwen3OmniMoeForConditionalGeneration = AutoModelForCausalLM
+            Qwen3OmniMoeProcessor = AutoProcessor
+        dtype = resolve_torch_dtype(os.environ.get("QWEN3_OMNI_DTYPE", "auto"))
+        device_override = os.environ.get("QWEN3_OMNI_DEVICE")
+        attn_impl = os.environ.get("QWEN3_OMNI_ATTN")
+        model_kwargs = {}
+        if dtype != "auto":
+            model_kwargs["dtype"] = dtype
+        if attn_impl:
+            model_kwargs["attn_implementation"] = attn_impl
+        if device_override:
+            model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+                QWEN3_OMNI_MODEL_ID,
+                device_map=None,
+                **model_kwargs,
+            )
+            model.to(device_override)
+        else:
+            try:
+                model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+                    QWEN3_OMNI_MODEL_ID,
+                    device_map="auto",
+                    **model_kwargs,
+                )
+            except Exception:
+                device = select_asr_device("QWEN3_OMNI_DEVICE")
+                model = Qwen3OmniMoeForConditionalGeneration.from_pretrained(
+                    QWEN3_OMNI_MODEL_ID,
+                    device_map=None,
+                    **model_kwargs,
+                )
+                model.to(device)
+        processor = Qwen3OmniMoeProcessor.from_pretrained(QWEN3_OMNI_MODEL_ID)
+        _QWEN3_OMNI_TORCH_MODEL = model
+        _QWEN3_OMNI_TORCH_PROCESSOR = processor
+    return _QWEN3_OMNI_TORCH_MODEL, _QWEN3_OMNI_TORCH_PROCESSOR
+
+
+def _transcribe_qwen3_omni_torch(audio_path: Path) -> str:
+    model, processor = _load_qwen3_omni_torch()
+    try:
+        from qwen_omni_utils import process_mm_info
+    except Exception:
+        from qwen_omni_utils import process_mm_input as process_mm_info
+
+    prompt = qwen3_omni_prompt()
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio": str(audio_path)},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    text = processor.apply_chat_template(
+        conversation,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+    use_audio_in_video = False
+    audios, images, videos = process_mm_info(conversation, use_audio_in_video=use_audio_in_video)
+    inputs = processor(
+        text=[text],
+        audios=audios,
+        images=images,
+        videos=videos,
+        padding=True,
+        return_tensors="pt",
+        use_audio_in_video=use_audio_in_video,
+    )
+    inputs = inputs.to(model.device)
+    try:
+        inputs = inputs.to(model.dtype)
+    except Exception:
+        pass
+    outputs = model.generate(
+        **inputs,
+        do_sample=False,
+        max_new_tokens=qwen3_omni_max_new_tokens(),
+    )
+    sequences = _extract_sequences(outputs)
+    prompt_len = inputs["input_ids"].shape[1] if "input_ids" in inputs else 0
+    decoded = processor.batch_decode(
+        sequences[:, prompt_len:],
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return decoded[0].strip() if decoded else ""
+
+
+def transcribe_qwen3_omni(audio_path: Path) -> TranscriptionResult:
+    """Transcribe with Qwen3-Omni (MLX preferred; PyTorch fallback)."""
+    start = time.time()
+    if EVAL_LANGUAGE != "zh":
+        return TranscriptionResult(
+            "qwen3-omni",
+            "",
+            time.time() - start,
+            0,
+            error="Qwen3-Omni backend enabled for Mandarin only",
+        )
+    mlx_error = None
+    if not os.environ.get("QWEN3_OMNI_DISABLE_MLX"):
+        try:
+            text = _transcribe_qwen3_omni_mlx(audio_path)
+            return TranscriptionResult("qwen3-omni", text, time.time() - start, len(text))
+        except Exception as e:
+            mlx_error = str(e)
+    try:
+        text = _transcribe_qwen3_omni_torch(audio_path)
+        return TranscriptionResult("qwen3-omni", text, time.time() - start, len(text))
+    except Exception as e:
+        error = f"mlx failed: {mlx_error}; torch failed: {e}" if mlx_error else str(e)
+        return TranscriptionResult("qwen3-omni", "", time.time() - start, 0, error=error)
+
+
 BACKEND_SPECS = [
     BackendSpec("whisper-large-v3", "Whisper-Large-V3", "whisper", transcribe_whisper_cpp),
     BackendSpec("funasr-nano", "Fun-ASR-Nano", "funasr", transcribe_funasr),
     BackendSpec("glm-asr", "GLM-ASR", "glm", transcribe_glm_asr),
+    BackendSpec("qwen3-omni", "Qwen3-Omni-30B-A3B", "qwen3-omni", transcribe_qwen3_omni),
 ]
 BACKEND_BY_KEY = {spec.key: spec for spec in BACKEND_SPECS}
 LEGACY_BACKEND_MAP = {
@@ -737,8 +950,10 @@ LEGACY_BACKEND_MAP = {
     "mlx-whisper": "mlx-whisper",
     "funasr-nano": "funasr-nano",
 }
-DEFAULT_BACKEND_KEYS = ("whisper-large-v3", "funasr-nano", "glm-asr")
-JP_BACKEND_KEYS = DEFAULT_BACKEND_KEYS
+BASE_BACKEND_KEYS = ("whisper-large-v3", "funasr-nano", "glm-asr")
+ZH_BACKEND_KEYS = BASE_BACKEND_KEYS + ("qwen3-omni",)
+DEFAULT_BACKEND_KEYS = BASE_BACKEND_KEYS
+JP_BACKEND_KEYS = BASE_BACKEND_KEYS
 
 
 def normalize_backend_key(key: str) -> str:
@@ -859,6 +1074,7 @@ def generate_html_report(
         .benchmark-card.mlx { background: linear-gradient(135deg, #ee0979 0%, #ff6a00 100%); }
         .benchmark-card.funasr { background: linear-gradient(135deg, #4776E6 0%, #8E54E9 100%); }
         .benchmark-card.glm { background: linear-gradient(135deg, #F7971E 0%, #FFD200 100%); }
+        .benchmark-card.qwen3-omni { background: linear-gradient(135deg, #0F2027 0%, #2C5364 100%); }
         .benchmark-card h4 { margin: 0 0 15px 0; font-size: 18px; }
         .speed-value { font-size: 48px; font-weight: bold; }
         .speed-label { font-size: 14px; opacity: 0.9; }
@@ -1424,7 +1640,12 @@ def main():
     if args.backends:
         backend_keys = [b.strip() for b in args.backends.split(",") if b.strip()]
     else:
-        backend_keys = list(JP_BACKEND_KEYS if args.japanese else DEFAULT_BACKEND_KEYS)
+        if args.japanese:
+            backend_keys = list(JP_BACKEND_KEYS)
+        elif EVAL_LANGUAGE == "zh":
+            backend_keys = list(ZH_BACKEND_KEYS)
+        else:
+            backend_keys = list(DEFAULT_BACKEND_KEYS)
     unknown = [b for b in backend_keys if b not in BACKEND_BY_KEY]
     if unknown:
         print(f"ERROR: Unknown backend(s): {', '.join(unknown)}")
