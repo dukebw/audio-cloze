@@ -8,7 +8,6 @@ import os
 import sqlite3
 import subprocess
 import sys
-import tempfile
 import time
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -32,7 +31,6 @@ FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 EVAL_DIR = Path(__file__).parent / "eval_samples"
 DEFAULT_AUDIO_SUBDIR = "audio"
-EP499_SAMPLE_START = 610  # contains "留下兩個懸念" in EP499 TAXI DRIVER
 RESULTS_FILE = EVAL_DIR / "eval_results.json"
 HTML_FILE = EVAL_DIR / "eval_compare.html"
 WHISPERX_METHOD = "whisperx"
@@ -44,7 +42,6 @@ _GLM_ASR_PROCESSOR = None
 _WHISPERX_ALIGN_MODEL = None
 _WHISPERX_ALIGN_META = None
 _WHISPERX_PATCHED = False
-_STABLE_TS_MODEL = None
 
 
 @dataclass
@@ -148,70 +145,6 @@ def ensure_sample_audio(sample: Sample, audio_path: Path,
         )
 
     return False
-
-
-def add_explicit_ep499_sample(results: list[EvalResult],
-                              conn: sqlite3.Connection,
-                              audio_dir: Path,
-                              backend_specs: list[BackendSpec]) -> None:
-    """Ensure EP499 sample is included for side-by-side comparison."""
-    row = conn.execute(
-        """
-        SELECT episode_id, title, channel_name, audio_url, duration
-        FROM episodes
-        WHERE title LIKE '%EP499%'
-        ORDER BY pub_date DESC
-        LIMIT 1
-        """
-    ).fetchone()
-    if not row:
-        print("WARNING: EP499 episode not found in database.")
-        return
-
-    episode_id, title, channel, audio_url, duration = row
-    if not audio_url:
-        print("WARNING: EP499 audio URL missing; cannot add sample.")
-        return
-
-    start_time = float(EP499_SAMPLE_START)
-    sample_id = f"pod_{episode_id[:8]}_{int(start_time)}"
-    audio_path = audio_dir / f"{sample_id}.mp3"
-    label = f"{title} (explicit @ {int(start_time)}s)"
-    sample = Sample(
-        sample_id=sample_id,
-        source_type="podcast",
-        source_id=episode_id,
-        title=label,
-        channel=channel,
-        audio_path=relative_audio_path(audio_path),
-        start_time=start_time,
-        duration=SAMPLE_DURATION
-    )
-
-    existing = next((r for r in results if r.sample.sample_id == sample_id), None)
-    if not ensure_sample_audio(sample, audio_path, conn):
-        print(f"  Missing audio: {audio_path.name} (skipping EP499 sample)")
-        return
-
-    try:
-        rel_path = audio_path.relative_to(EVAL_DIR)
-        if sample.audio_path != str(rel_path):
-            sample.audio_path = str(rel_path)
-    except ValueError:
-        pass
-
-    transcriptions = run_transcriptions(
-        audio_path,
-        backend_specs,
-        existing=existing.transcriptions if existing else None,
-        audio_duration=sample.duration
-    )
-
-    if existing:
-        existing.sample = sample
-        existing.transcriptions = transcriptions
-    else:
-        results.append(EvalResult(sample=sample, transcriptions=transcriptions))
 
 
 def get_random_youtube_samples(conn: sqlite3.Connection, n: int) -> list[dict]:
@@ -347,83 +280,10 @@ def convert_to_wav(mp3_path: Path) -> Path:
 # Alignment helpers (for eval_compare.html highlighting)
 # =============================================================================
 
-def _is_chinese(char: str) -> bool:
-    return "\u4e00" <= char <= "\u9fff"
-
-
-def _parse_timestamp(value: str) -> Optional[float]:
-    if not value:
-        return None
-    try:
-        parts = value.split(",")
-        hms = parts[0].split(":")
-        if len(hms) != 3:
-            return None
-        hours = int(hms[0])
-        minutes = int(hms[1])
-        seconds = int(hms[2])
-        millis = int(parts[1]) if len(parts) > 1 else 0
-        return hours * 3600 + minutes * 60 + seconds + millis / 1000.0
-    except Exception:
-        return None
-
-
-def _parse_whispercpp_json(json_path: Path) -> tuple[str, list[dict]]:
+def _parse_whispercpp_text(json_path: Path) -> str:
     data = json.loads(json_path.read_text(encoding="utf-8", errors="replace"))
     segments = data.get("transcription", []) or data.get("segments", [])
-    text = "".join(seg.get("text", "") for seg in segments).strip()
-    tokens: list[dict] = []
-    for seg in segments:
-        for tok in seg.get("tokens", []) or []:
-            token_text = tok.get("text", "")
-            if not token_text:
-                continue
-            stripped = token_text.strip()
-            if stripped.startswith("[_") or stripped.startswith("<|") or (stripped.startswith("[") and stripped.endswith("]")):
-                continue
-            if "�" in stripped:
-                continue
-            offsets = tok.get("offsets") or {}
-            start_ms = offsets.get("from")
-            end_ms = offsets.get("to")
-            if start_ms is None or end_ms is None:
-                timestamps = tok.get("timestamps") or {}
-                start = _parse_timestamp(timestamps.get("from"))
-                end = _parse_timestamp(timestamps.get("to"))
-            else:
-                start = start_ms / 1000.0
-                end = end_ms / 1000.0
-            tokens.append({
-                "text": token_text,
-                "start": start,
-                "end": end,
-                "score": tok.get("p"),
-            })
-    return text, tokens
-
-
-def _load_audio_mono_16k(audio_path: Path):
-    import torch
-    import torchaudio
-    try:
-        waveform, sr = torchaudio.load(str(audio_path))
-    except Exception:
-        from pydub import AudioSegment
-        audio = AudioSegment.from_file(str(audio_path))
-        audio = audio.set_frame_rate(16000).set_channels(1)
-        samples = audio.get_array_of_samples()
-        try:
-            import numpy as np
-            arr = np.array(samples, dtype="float32") / 32768.0
-            waveform = torch.from_numpy(arr).unsqueeze(0)
-        except Exception:
-            waveform = torch.tensor(samples, dtype=torch.float32).unsqueeze(0) / 32768.0
-        sr = 16000
-    if sr != 16000:
-        waveform = torchaudio.functional.resample(waveform, sr, 16000)
-    if waveform.shape[0] > 1:
-        waveform = waveform.mean(dim=0, keepdim=True)
-    return waveform
+    return "".join(seg.get("text", "") for seg in segments).strip()
 
 
 def _init_whisperx():
@@ -484,108 +344,6 @@ def _init_whisperx():
         _WHISPERX_PATCHED = True
 
 
-def _mms_char_tokens(audio_path: Path, transcript: str) -> list[dict]:
-    tokens = [{"text": c, "start": None, "end": None, "score": None} for c in transcript]
-    try:
-        import torch
-        import torchaudio
-        from torchaudio.pipelines import MMS_FA
-    except ImportError as e:
-        raise RuntimeError(f"missing deps: {e}")
-
-    waveform = _load_audio_mono_16k(audio_path)
-    device = "cpu"
-    bundle = MMS_FA
-    model = bundle.get_model().to(device)
-    with torch.no_grad():
-        emission, _ = model(waveform.to(device))
-    dictionary = bundle.get_dict()
-    unk_id = dictionary.get("<unk>")
-    align_indices = []
-    token_ids = []
-    for i, c in enumerate(transcript):
-        if not _is_chinese(c):
-            continue
-        token_id = dictionary.get(c.lower())
-        if token_id is None:
-            if unk_id is None or unk_id == 0:
-                continue
-            token_id = unk_id
-        if token_id == 0:
-            continue
-        align_indices.append(i)
-        token_ids.append(token_id)
-    if not token_ids:
-        return tokens
-    targets = torch.tensor([token_ids], dtype=torch.int32, device=device)
-    alignments, scores = torchaudio.functional.forced_align(emission, targets, blank=0)
-    num_frames = emission.shape[1]
-    audio_duration = waveform.shape[1] / 16000
-    frame_duration = audio_duration / num_frames if num_frames else 0.0
-    alignments = alignments[0].cpu().tolist()
-    scores = scores[0].cpu().tolist()
-    char_idx = 0
-    for i, (token_id, score) in enumerate(zip(alignments, scores)):
-        if token_id != 0 and char_idx < len(align_indices):
-            idx = align_indices[char_idx]
-            tokens[idx]["start"] = i * frame_duration
-            tokens[idx]["end"] = (i + 1) * frame_duration
-            tokens[idx]["score"] = score
-            char_idx += 1
-    return tokens
-
-
-def _mms_pinyin_tokens(audio_path: Path, transcript: str) -> list[dict]:
-    tokens = [{"text": c, "start": None, "end": None, "score": None} for c in transcript]
-    align_indices = [i for i, c in enumerate(transcript) if _is_chinese(c)]
-    align_chars = [transcript[i] for i in align_indices]
-    if not align_chars:
-        return tokens
-    try:
-        import torch
-        import torchaudio
-        from torchaudio.pipelines import MMS_FA
-        from pypinyin import pinyin, Style
-    except ImportError as e:
-        raise RuntimeError(f"missing deps: {e}")
-
-    pinyin_tokens = []
-    for c in align_chars:
-        py = pinyin(c, style=Style.NORMAL, strict=False, errors="ignore")
-        if not py:
-            pinyin_tokens.append("")
-        else:
-            pinyin_tokens.append(py[0][0])
-
-    waveform = _load_audio_mono_16k(audio_path)
-    device = "cpu"
-    bundle = MMS_FA
-    model = bundle.get_model().to(device)
-    tokenizer = bundle.get_tokenizer()
-    aligner = bundle.get_aligner()
-    with torch.no_grad():
-        emission, _ = model(waveform.to(device))
-    tokenized = tokenizer(pinyin_tokens)
-    spans = aligner(emission[0], tokenized)
-    ratio = waveform.shape[1] / emission.shape[1] / 16000
-    for j, span_item in enumerate(spans):
-        if j >= len(align_indices):
-            break
-        if isinstance(span_item, list):
-            if not span_item:
-                continue
-            start_span = span_item[0]
-            end_span = span_item[-1]
-        else:
-            start_span = span_item
-            end_span = span_item
-        idx = align_indices[j]
-        tokens[idx]["start"] = float(start_span.start * ratio)
-        tokens[idx]["end"] = float(end_span.end * ratio)
-        tokens[idx]["score"] = float(getattr(end_span, "score", 0.0))
-    return tokens
-
-
 def _whisperx_tokens(audio_path: Path, transcript: str) -> list[dict]:
     try:
         _init_whisperx()
@@ -629,31 +387,6 @@ def _whisperx_tokens(audio_path: Path, transcript: str) -> list[dict]:
                     "end": word.get("end"),
                     "score": word.get("score") or word.get("probability"),
                 })
-    return tokens
-
-
-def _stable_ts_tokens(audio_path: Path, transcript: str) -> list[dict]:
-    try:
-        import stable_whisper
-    except Exception as e:
-        raise RuntimeError(f"missing deps: {e}")
-    global _STABLE_TS_MODEL
-    if _STABLE_TS_MODEL is None:
-        _STABLE_TS_MODEL = stable_whisper.load_model("base")
-    try:
-        result = _STABLE_TS_MODEL.align(str(audio_path), transcript, "Chinese")
-    except Exception:
-        result = _STABLE_TS_MODEL.align(str(audio_path), transcript, "zh")
-    data = result.to_dict() if hasattr(result, "to_dict") else result
-    tokens: list[dict] = []
-    for seg in data.get("segments", []) if isinstance(data, dict) else []:
-        for word in seg.get("words", []) or []:
-            tokens.append({
-                "text": word.get("word", ""),
-                "start": word.get("start"),
-                "end": word.get("end"),
-                "score": word.get("probability") or word.get("score"),
-            })
     return tokens
 
 
@@ -720,7 +453,7 @@ def transcribe_whisper_cpp(audio_path: Path) -> TranscriptionResult:
 
         json_file = Path(str(output_base) + ".json")
         if json_file.exists():
-            text, _ = _parse_whispercpp_json(json_file)
+            text = _parse_whispercpp_text(json_file)
             alignments = None
             json_file.unlink()
         else:
@@ -1491,8 +1224,6 @@ def main():
                         help="Audio cache directory (relative to eval_samples unless absolute)")
     parser.add_argument("--backends", default=",".join(spec.key for spec in BACKEND_SPECS),
                         help="Comma-separated backend keys to run")
-    parser.add_argument("--include-ep499", action="store_true",
-                        help="Include explicit EP499 TAXI DRIVER sample for comparison")
     args = parser.parse_args()
 
     backend_keys = [b.strip() for b in args.backends.split(",") if b.strip()]
@@ -1521,8 +1252,6 @@ def main():
         conn = sqlite3.connect(str(db_path)) if db_path.exists() else None
         if conn is None:
             print("WARNING: Database not found; podcast audio cannot be re-downloaded.")
-        if conn is not None and args.include_ep499:
-            add_explicit_ep499_sample(results, conn, audio_dir, backend_specs)
         for i, result in enumerate(results):
             sample = result.sample
             audio_path = resolve_audio_path(sample.audio_path, audio_dir)
@@ -1637,8 +1366,6 @@ def main():
                 transcriptions=transcriptions
             ))
 
-        if args.include_ep499:
-            add_explicit_ep499_sample(results, conn, audio_dir, backend_specs)
 
         conn.close()
 

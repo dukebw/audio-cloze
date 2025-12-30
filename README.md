@@ -104,7 +104,7 @@ python audio_vocab_miner.py index --sources sources.txt --db vocab.db \
 
 # Reindex specific podcast episodes by title
 python audio_vocab_miner.py index --sources sources.txt --db vocab.db \
-  --type podcast --podcast-title "EP499" --podcast-reindex
+  --type podcast --podcast-title "TAXI DRIVER" --podcast-reindex
 
 # Check what's indexed
 python audio_vocab_miner.py stats --db vocab.db
