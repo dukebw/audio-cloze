@@ -10,6 +10,7 @@ Completed work and key snapshots.
 - Clip generation: ffmpeg extraction, cloze silencing, clip merge across runs, HTML review UI.
 - Eval report with WhisperX alignment highlighting.
 - Reproducible Python tooling via `pyproject.toml` + `uv.lock` (extras for ASR + MLX).
+- Hosting docs + publish script for syncing HTML to personal-website and audio to S3.
 
 ### Fixed / stabilized
 - Fun-ASR-Nano: Qwen3 weight bootstrap + transformers `load_in_8bit` patch.

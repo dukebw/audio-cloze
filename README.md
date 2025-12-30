@@ -175,6 +175,13 @@ when `opencc-python-reimplemented` is installed. Audio clips are cached under
 `eval_samples/audio` (gitignored). Use `--audio-dir` to change the cache
 location.
 
+## Hosting
+
+Static HTML pages are deployed via the `dukebw/personal-website` repo, while
+audio binaries live in S3/CloudFront. Use `scripts/publish_site.py` to build
+HTML, rewrite audio URLs, sync audio to S3, and copy HTML into the website repo.
+See `docs/hosting.md` for the full flow and required environment variables.
+
 ## Output
 
 For each word found:

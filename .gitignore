@@ -17,6 +17,7 @@ experiments/.venv_align/
 # Temp files
 *.part
 *.vtt
+dist/
 
 # Large model files
 models/
