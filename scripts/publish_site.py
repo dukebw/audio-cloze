@@ -144,7 +144,7 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Publish audio-cloze artifacts.")
     parser.add_argument(
         "--site-root",
-        default="~/work/personal-website/static/audio-cloze",
+        default="~/work/personal-website/audio-cloze",
         help="Destination folder in personal-website repo.",
     )
     parser.add_argument(
