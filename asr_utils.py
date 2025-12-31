@@ -113,6 +113,7 @@ def patch_transformers_video_processor() -> bool:
 
 def _init_whisperx() -> None:
     global _WHISPERX_PATCHED
+    ensure_lzma()
     import os as _os
     import numpy as _np
     import torch as _torch

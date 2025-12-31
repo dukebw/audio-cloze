@@ -526,6 +526,7 @@ def _parse_whispercpp_text(json_path: Path) -> str:
 
 def _init_whisperx():
     global _WHISPERX_PATCHED
+    ensure_lzma()
     import os as _os
     import numpy as _np
     import torch as _torch
