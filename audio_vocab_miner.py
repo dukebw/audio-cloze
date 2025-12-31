@@ -7,7 +7,7 @@ Strategy:
            Crawl podcasts → Run ASR → Build transcript chunk index
 2. MINE: Query index (instant) → Download audio slice → Create cloze
 
-Podcast timing uses ASR + forced alignment.
+Podcast timing uses ASR + WhisperX alignment.
 """
 
 import json
@@ -55,6 +55,7 @@ from asr_utils import (
     patch_transformers_video_processor,
     patch_funasr_load_in_8bit,
     select_asr_device,
+    whisperx_align_tokens,
 )
 
 
@@ -1431,98 +1432,66 @@ def transcribe_audio(audio_path: Path, backend: str, conn: sqlite3.Connection = 
 def align_transcript_to_audio(audio_path: Path, transcript: str, word: str) -> list[dict]:
     """Force-align transcript to audio and find word occurrences.
 
-    Uses torchaudio MMS_FA for character-level alignment (supports 1000+ languages).
+    Uses WhisperX for character-level alignment when available.
     Returns list of occurrences with {start, end, text, confidence, found_variant}.
     """
-    try:
-        import torch
-        import torchaudio
-        from torchaudio.pipelines import MMS_FA
-    except ImportError:
-        raise RuntimeError("Forced alignment requires: pip install torch torchaudio")
+    log.info(f"  Running WhisperX alignment on {audio_path.name}...")
 
-    log.info(f"  Running forced alignment on {audio_path.name}...")
-
-    # Load and resample audio to 16kHz
+    # WhisperX can handle most formats, but keep WAV conversion for consistency.
     temp_wav = None
     load_path = audio_path
     if audio_path.suffix.lower() != ".wav":
         temp_wav = convert_audio_to_wav(audio_path)
         load_path = temp_wav
 
+    def detect_language(text: str, fallback: str = "zh") -> str:
+        if any("\u3040" <= c <= "\u30ff" for c in text):
+            return "ja"
+        if any("\u4e00" <= c <= "\u9fff" for c in text):
+            return "zh"
+        return "en" if any(c.isascii() for c in text) else fallback
+
     try:
+        language_code = detect_language(transcript or word)
         try:
-            waveform, sr = torchaudio.load(str(load_path))
-        except ImportError as e:
-            log.warning(f"torchaudio.load failed ({e}); falling back to pydub")
-            audio = AudioSegment.from_file(str(load_path))
-            audio = audio.set_frame_rate(16000).set_channels(1)
-            samples = audio.get_array_of_samples()
-            try:
-                import numpy as np
-                arr = np.array(samples, dtype="float32") / 32768.0
-                waveform = torch.from_numpy(arr).unsqueeze(0)
-            except Exception:
-                waveform = torch.tensor(samples, dtype=torch.float32).unsqueeze(0) / 32768.0
-            sr = 16000
-        if sr != 16000:
-            waveform = torchaudio.functional.resample(waveform, sr, 16000)
-        if waveform.shape[0] > 1:
-            waveform = waveform.mean(dim=0, keepdim=True)  # Mono
-
-        # Get emission from MMS model
-        device = "mps" if torch.backends.mps.is_available() else "cpu"
-        bundle = MMS_FA
-        model = bundle.get_model().to(device)
-        with torch.no_grad():
-            emission, _ = model(waveform.to(device))
-
-        # Get dictionary for tokenization
-        dictionary = bundle.get_dict()
-
-        # Clean transcript for alignment (Chinese characters only)
-        clean_text = ''.join(c for c in transcript if '\u4e00' <= c <= '\u9fff' or c.isascii())
-        chars = list(clean_text)
-
-        if not chars:
-            log.warning("No alignable characters in transcript")
-            return []
-
-        # Tokenize (map characters to token IDs)
-        unk_id = dictionary.get("<unk>", 0)
-        tokens = [dictionary.get(c.lower(), unk_id) for c in chars]
-
-        # Run forced alignment
-        targets = torch.tensor([tokens], dtype=torch.int32, device=device)
-        try:
-            alignments, scores = torchaudio.functional.forced_align(
-                emission, targets, blank=0
-            )
+            tokens = whisperx_align_tokens(load_path, transcript, language_code)
         except Exception as e:
-            log.error(f"Forced alignment failed: {e}")
+            log.error(f"WhisperX alignment failed: {e}")
             return []
 
-        # Convert frame indices to timestamps
-        num_frames = emission.shape[1]
-        audio_duration = waveform.shape[1] / 16000
-        frame_duration = audio_duration / num_frames
-
-        # Build character-level spans
         char_spans = []
-        alignments = alignments[0].cpu().tolist()
-        scores = scores[0].cpu().tolist()
+        for tok in tokens:
+            text = (tok.get("text") or "").strip()
+            if not text:
+                continue
+            start = tok.get("start")
+            end = tok.get("end")
+            if start is None or end is None:
+                continue
+            score = tok.get("score", 0.0)
+            if len(text) == 1:
+                char_spans.append({
+                    'char': text,
+                    'start': float(start),
+                    'end': float(end),
+                    'score': score,
+                })
+                continue
+            duration = max(float(end) - float(start), 0.0)
+            step = duration / len(text) if duration and len(text) else 0.0
+            for idx, ch in enumerate(text):
+                ch_start = float(start) + idx * step
+                ch_end = float(start) + (idx + 1) * step if step else float(end)
+                char_spans.append({
+                    'char': ch,
+                    'start': ch_start,
+                    'end': ch_end,
+                    'score': score,
+                })
 
-        char_idx = 0
-        for i, (token_id, score) in enumerate(zip(alignments, scores)):
-            if token_id != 0:  # Skip blank tokens
-                if char_idx < len(chars):
-                    char_spans.append({
-                        'char': chars[char_idx],
-                        'start': i * frame_duration,
-                        'end': (i + 1) * frame_duration,
-                        'score': score,
-                    })
-                    char_idx += 1
+        if not char_spans:
+            log.warning("No alignable tokens returned from WhisperX")
+            return []
 
         # Find word occurrences in character spans
         occurrences = []
@@ -1562,7 +1531,7 @@ def align_transcript_to_audio(audio_path: Path, transcript: str, word: str) -> l
 
 
 def localize_word_with_transcript(audio_path: Path, transcript: str, word: str) -> list[dict]:
-    """Find word timing using a provided transcript (forced alignment)."""
+    """Find word timing using a provided transcript (WhisperX alignment)."""
     if not transcript:
         return []
     if not find_word_spans(transcript, word, allow_fuzzy=True):
@@ -1576,7 +1545,7 @@ def localize_word_with_backend(audio_path: Path, word: str, backend: str,
     """Find word timing using specified ASR backend.
 
     For whisper backends: uses native word timestamps.
-    For other backends: uses transcription + forced alignment.
+    For other backends: uses transcription + WhisperX alignment.
     """
     if backend in ('whispercpp', 'mlx_whisper'):
         # Use native word timestamps
