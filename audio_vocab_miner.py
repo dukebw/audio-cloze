@@ -52,6 +52,7 @@ from asr_utils import (
     ensure_lzma,
     ensure_qwen3_weights,
     load_glm_asr_transformers,
+    patch_transformers_video_processor,
     patch_funasr_load_in_8bit,
     select_asr_device,
 )
@@ -1211,6 +1212,7 @@ def _load_qwen3_omni_mlx():
     global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
     if _QWEN3_OMNI_MLX_MODEL is None or _QWEN3_OMNI_MLX_PROCESSOR is None:
         ensure_lzma()
+        patch_transformers_video_processor()
         from mlx_vlm import load as mlx_load
         model, processor = mlx_load(QWEN3_OMNI_MLX_MODEL_ID)
         if hasattr(model, "config") and hasattr(processor, "tokenizer"):

@@ -85,6 +85,26 @@ def patch_funasr_load_in_8bit() -> bool:
     return True
 
 
+def patch_transformers_video_processor() -> bool:
+    """Guard transformers video processor lookup against None values."""
+    try:
+        from transformers.models.auto import video_processing_auto as vpa
+    except Exception:
+        return False
+    if getattr(vpa, "_audio_cloze_none_guard", False):
+        return True
+    original = vpa.video_processor_class_from_name
+
+    def _patched(class_name: Optional[str]):
+        if class_name is None:
+            return None
+        return original(class_name)
+
+    vpa.video_processor_class_from_name = _patched
+    vpa._audio_cloze_none_guard = True
+    return True
+
+
 def load_glm_asr_transformers(
     model_id: str,
     device_env: str = "GLM_ASR_DEVICE",

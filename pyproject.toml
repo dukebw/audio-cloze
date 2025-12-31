@@ -6,6 +6,7 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 
 dependencies = [
+  "backports.lzma>=0.0.14",
   "pydub>=0.25.1",
   "opencc-python-reimplemented>=0.1.7",
   "webvtt-py>=0.4.6",
@@ -29,6 +30,7 @@ asr = [
 # MLX + Qwen3-Omni path (Apple Silicon)
 mlx = [
   "mlx-vlm @ git+https://github.com/Blaizzy/mlx-vlm.git",
+  "torchvision>=0.18.0",
   "librosa>=0.10.2",
   "soundfile>=0.12.1",
 ]
