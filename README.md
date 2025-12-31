@@ -180,7 +180,13 @@ location.
 Static HTML pages are deployed via the `dukebw/personal-website` repo, while
 audio binaries live in S3/CloudFront. Use `scripts/publish_site.py` to build
 HTML, rewrite audio URLs, sync audio to S3, and copy HTML into the website repo.
-See `docs/hosting.md` for the full flow and required environment variables.
+See `docs/hosting.md` for the full flow, architecture diagrams, and required
+environment variables.
+
+## Docs
+
+- `docs/hosting.md` — Private S3 + CloudFront architecture and publish flow.
+- Add new docs here so README stays the entry point.
 
 ## Output
 
