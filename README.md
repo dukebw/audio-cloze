@@ -6,27 +6,21 @@ Mine Chinese vocabulary from YouTube and podcasts. Generate audio cloze cards fo
 
 You give it a Chinese word. It finds that word spoken in real content, extracts the audio clip, and creates a version with the target word silenced (the "cloze"). You review the clips and export to Anki.
 
-```
-┌─────────────────────────────────────────────────────────────────────────────┐
-│                              ARCHITECTURE                                    │
-├─────────────────────────────────────────────────────────────────────────────┤
-│                                                                             │
-│   sources.txt              vocab.db (SQLite)              audio_clips/      │
-│   ┌──────────┐            ┌─────────────────┐            ┌──────────────┐   │
-│   │ YouTube  │──index───▶ │ captions (FTS5) │──mine────▶ │ word_clip.mp3│   │
-│   │ Podcasts │            │ podcast_captions│            │ word_cloze.mp3│  │
-│   └──────────┘            └─────────────────┘            │ review.html  │   │
-│                                   │                      └──────────────┘   │
-│                                   │                             │           │
-│                           ┌───────▼───────┐                     │           │
-│                           │  Fun-ASR-Nano │◀── ASR for podcast  │           │
-│                           │  (default)    │    indexing + timing│           │
-│                           └───────────────┘                     │           │
-│                                                                 │           │
-│                                                          ┌──────▼──────┐    │
-│                                                          │    Anki     │    │
-│                                                          └─────────────┘    │
-└─────────────────────────────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+  Sources["sources.txt<br/>YouTube + Podcasts"]
+  DB["vocab.db<br/>SQLite FTS5"]
+  ASRIndex["Fun-ASR-Nano<br/>default (mining)"]
+  Clips["audio_clips/<br/>word_clip.mp3<br/>word_cloze.mp3<br/>review.html"]
+  Anki["Anki export"]
+  EvalAudio["eval_samples/<br/>audio cache"]
+  EvalASR["Qwen3-Omni<br/>default (evals)"]
+  EvalReport["eval_compare.html<br/>eval_compare_text.json"]
+
+  Sources -->|index| DB
+  ASRIndex -->|podcast transcripts + timing| DB
+  DB -->|mine| Clips --> Anki
+  EvalAudio --> EvalASR -->|transcribe| EvalReport
 ```
 
 ## The trick
@@ -180,12 +174,11 @@ location.
 Static HTML pages are deployed via the `dukebw/personal-website` repo, while
 audio binaries live in S3/CloudFront. Use `scripts/publish_site.py` to build
 HTML, rewrite audio URLs, sync audio to S3, and copy HTML into the website repo.
-See `docs/hosting.md` for the full flow, architecture diagrams, and required
-environment variables.
+See `docs/hosting.md` for the full flow and required environment variables.
 
 ## Docs
 
-- `docs/hosting.md` — Private S3 + CloudFront architecture and publish flow.
+- `docs/hosting.md` — Private S3 + CloudFront hosting flow.
 - Add new docs here so README stays the entry point.
 
 ## Output

@@ -2,6 +2,16 @@
 
 Completed work and key snapshots.
 
+## 2025-12-31
+
+### Added
+- Private S3 + CloudFront hosting documentation with architecture + request flow diagrams, plus IAM assume-role guidance.
+- Publish flow for syncing HTML to personal-website and audio to S3.
+
+### Changed
+- README now links the hosting doc via a Docs section for discoverability.
+- Publish defaults now target `~/work/personal-website/audio-cloze` (instead of `static/`), and hosting docs reflect the new path.
+
 ## 2025-12-30
 
 ### Added
@@ -10,7 +20,6 @@ Completed work and key snapshots.
 - Clip generation: ffmpeg extraction, cloze silencing, clip merge across runs, HTML review UI.
 - Eval report with WhisperX alignment highlighting.
 - Reproducible Python tooling via `pyproject.toml` + `uv.lock` (extras for ASR + MLX).
-- Hosting docs + publish script for syncing HTML to personal-website and audio to S3.
 
 ### Fixed / stabilized
 - Fun-ASR-Nano: Qwen3 weight bootstrap + transformers `load_in_8bit` patch.
