@@ -3,7 +3,7 @@ name = "audio-cloze"
 version = "0.1.0"
 description = "Mine Chinese vocabulary from YouTube and podcasts, generate audio cloze cards for Anki."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.10,<3.13"
 
 dependencies = [
   "pydub>=0.25.1",

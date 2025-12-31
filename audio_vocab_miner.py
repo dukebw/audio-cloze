@@ -49,6 +49,7 @@ import hashlib
 import html
 import requests
 from asr_utils import (
+    ensure_lzma,
     ensure_qwen3_weights,
     load_glm_asr_transformers,
     patch_funasr_load_in_8bit,
@@ -1103,15 +1104,20 @@ def localize_word_in_chunk(audio_url: str, word: str, chunk_start: float,
 
 
 # =============================================================================
-# Alternative ASR Backends (Fun-ASR-Nano, GLM-ASR)
+# Alternative ASR Backends (Qwen3-Omni, Fun-ASR-Nano, GLM-ASR)
 # =============================================================================
 
-# Available backends: 'whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'
-DEFAULT_ASR_BACKEND = 'funasr_nano'
+# Available backends: 'whispercpp', 'mlx_whisper', 'qwen3_omni', 'funasr_nano', 'glm_asr'
+DEFAULT_ASR_BACKEND = 'qwen3_omni'
+QWEN3_OMNI_MLX_MODEL_ID = "mlx-community/Qwen3-Omni-30B-A3B-Instruct-8bit"
+QWEN3_OMNI_PROMPT_ZH = "请逐字转写音频内容，英文单词保持英文拼写，不要音译或翻译。只输出转写文本。"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 GLM_ASR_ENDPOINT = "http://127.0.0.1:8000/v1"  # Optional OpenAI-compatible endpoint
 
+_QWEN3_OMNI_MLX_MODEL = None
+_QWEN3_OMNI_MLX_PROCESSOR = None
+_QWEN3_OMNI_MLX_UNSUPPORTED = False
 _FUNASR_MODEL = None
 _GLM_ASR_MODEL = None
 _GLM_ASR_PROCESSOR = None
@@ -1188,6 +1194,111 @@ def transcribe_with_mlx_whisper(audio_path: Path) -> str:
         language="zh"
     )
     return result.get("text", "").strip()
+
+
+def qwen3_omni_prompt() -> str:
+    override = os.environ.get("QWEN3_OMNI_PROMPT")
+    if override:
+        return override
+    return QWEN3_OMNI_PROMPT_ZH
+
+
+def qwen3_omni_max_new_tokens() -> int:
+    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", "1024"))
+
+
+def _load_qwen3_omni_mlx():
+    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
+    if _QWEN3_OMNI_MLX_MODEL is None or _QWEN3_OMNI_MLX_PROCESSOR is None:
+        ensure_lzma()
+        from mlx_vlm import load as mlx_load
+        model, processor = mlx_load(QWEN3_OMNI_MLX_MODEL_ID)
+        if hasattr(model, "config") and hasattr(processor, "tokenizer"):
+            if not hasattr(model.config, "eos_token_id"):
+                model.config.eos_token_id = processor.tokenizer.eos_token_id
+        _QWEN3_OMNI_MLX_MODEL = model
+        _QWEN3_OMNI_MLX_PROCESSOR = processor
+    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
+
+
+def _transcribe_with_qwen3_omni_mlx(audio_path: Path) -> str:
+    model, processor = _load_qwen3_omni_mlx()
+    import librosa
+    import numpy as np
+    import mlx.core as mx
+
+    prompt = qwen3_omni_prompt()
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio": "placeholder"},
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+    formatted = processor.apply_chat_template(
+        conversation,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    sr = getattr(processor.feature_extractor, "sampling_rate", 16000)
+    audio, _ = librosa.load(str(audio_path), sr=sr)
+    processed = processor(
+        text=formatted,
+        audio=[audio],
+        padding=True,
+        return_attention_mask=True,
+        return_tensors=None,
+    )
+
+    input_ids = mx.array(processed["input_ids"])
+    feature_attention_mask = np.array(processed["feature_attention_mask"], dtype=np.int32)
+    audio_feature_lengths = np.sum(feature_attention_mask, axis=-1, dtype=np.int32)
+    input_features = np.array(processed["input_features"])
+
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    thinker_eos = getattr(model.config, "eos_token_id", None)
+    if thinker_eos is None:
+        thinker_eos = getattr(tokenizer, "eos_token_id", None)
+    thinker_result, _ = model.generate(
+        input_ids,
+        return_audio=False,
+        thinker_max_new_tokens=qwen3_omni_max_new_tokens(),
+        thinker_temperature=0.0,
+        thinker_top_p=1.0,
+        thinker_eos_token_id=thinker_eos,
+        input_features=mx.array(input_features),
+        feature_attention_mask=mx.array(feature_attention_mask),
+        audio_feature_lengths=mx.array(audio_feature_lengths, dtype=mx.int32),
+    )
+    sequences = thinker_result.sequences
+    prompt_len = input_ids.shape[1]
+    decoded = tokenizer.batch_decode(
+        sequences[:, prompt_len:].tolist(),
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return decoded[0].strip() if decoded else ""
+
+
+def transcribe_with_qwen3_omni(audio_path: Path) -> str:
+    """Transcribe audio using Qwen3-Omni via MLX (text only)."""
+    global _QWEN3_OMNI_MLX_UNSUPPORTED
+    if os.environ.get("QWEN3_OMNI_DISABLE_MLX"):
+        raise RuntimeError("Qwen3-Omni MLX backend disabled via QWEN3_OMNI_DISABLE_MLX")
+    if _QWEN3_OMNI_MLX_UNSUPPORTED:
+        raise RuntimeError("Qwen3-Omni MLX backend unavailable (previous failure)")
+    try:
+        log.info(f"  Running Qwen3-Omni (MLX) on {audio_path.name}...")
+        return _transcribe_with_qwen3_omni_mlx(audio_path)
+    except Exception as e:
+        _QWEN3_OMNI_MLX_UNSUPPORTED = True
+        raise RuntimeError(
+            "Qwen3-Omni MLX failed. Ensure mlx-vlm >= 0.3.10 (GitHub) and "
+            f"audio decoding support are available. Error: {e}"
+        )
 
 
 def transcribe_with_funasr(audio_path: Path, language: str = "中文") -> str:
@@ -1299,6 +1410,8 @@ def transcribe_audio(audio_path: Path, backend: str, conn: sqlite3.Connection = 
         transcript = transcribe_with_whisper_cpp(audio_path)
     elif backend == 'mlx_whisper':
         transcript = transcribe_with_mlx_whisper(audio_path)
+    elif backend == 'qwen3_omni':
+        transcript = transcribe_with_qwen3_omni(audio_path)
     elif backend == 'funasr_nano':
         transcript = transcribe_with_funasr(audio_path)
     elif backend == 'glm_asr':
@@ -2709,8 +2822,8 @@ Examples:
                              default='all', help='Only index specific source type')
     index_parser.add_argument('--limit', type=int, default=500, help='Max items per source')
     index_parser.add_argument('--podcast-asr-backend', default=DEFAULT_ASR_BACKEND,
-                             choices=['whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'],
-                             help='ASR backend for podcast indexing (default: funasr_nano)')
+                             choices=['whispercpp', 'mlx_whisper', 'qwen3_omni', 'funasr_nano', 'glm_asr'],
+                             help='ASR backend for podcast indexing (default: qwen3_omni)')
     index_parser.add_argument('--podcast-title', help='Only index podcast episodes with title containing this text')
     index_parser.add_argument('--podcast-reindex', action='store_true',
                              help='Reindex podcast episodes even if already transcribed')
@@ -2721,9 +2834,9 @@ Examples:
     mine_parser.add_argument('--db', default='vocab.db', help='Database path')
     mine_parser.add_argument('-o', '--output', default='./audio_clips', help='Output directory')
     mine_parser.add_argument('-n', '--num-clips', type=int, default=2, help='Clips per word')
-    mine_parser.add_argument('--asr-backend', default='funasr_nano',
-                             choices=['whispercpp', 'mlx_whisper', 'funasr_nano', 'glm_asr'],
-                             help='ASR backend for podcast timing (default: funasr_nano)')
+    mine_parser.add_argument('--asr-backend', default=DEFAULT_ASR_BACKEND,
+                             choices=['whispercpp', 'mlx_whisper', 'qwen3_omni', 'funasr_nano', 'glm_asr'],
+                             help='ASR backend for podcast timing (default: qwen3_omni)')
     mine_parser.add_argument('--glm-endpoint', default='http://127.0.0.1:8000/v1',
                              help='Optional OpenAI-compatible /audio/transcriptions endpoint (set GLM_ASR_PREFER_ENDPOINT=1)')
 

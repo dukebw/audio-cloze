@@ -11,7 +11,7 @@ flowchart LR
   Sources["sources.txt"]
   YT["YouTube subtitles"]
   Pod["Podcasts audio"]
-  ASRIndex["Fun-ASR-Nano<br/>default (mining)"]
+  ASRIndex["Qwen3-Omni<br/>default (mining)"]
   DB["vocab.db<br/>SQLite FTS5"]
   Align["Alignment<br/>MMS_FA / whisper.cpp"]
   Clips["audio_clips/<br/>clip + cloze + review.html"]
