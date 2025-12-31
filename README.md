@@ -8,19 +8,34 @@ You give it a Chinese word. It finds that word spoken in real content, extracts 
 
 ```mermaid
 flowchart LR
-  Sources["sources.txt<br/>YouTube + Podcasts"]
-  DB["vocab.db<br/>SQLite FTS5"]
+  Sources["sources.txt"]
+  YT["YouTube subtitles"]
+  Pod["Podcasts audio"]
   ASRIndex["Fun-ASR-Nano<br/>default (mining)"]
-  Clips["audio_clips/<br/>word_clip.mp3<br/>word_cloze.mp3<br/>review.html"]
-  Anki["Anki export"]
-  EvalAudio["eval_samples/<br/>audio cache"]
+  DB["vocab.db<br/>SQLite FTS5"]
+  Align["Alignment<br/>MMS_FA / whisper.cpp"]
+  Clips["audio_clips/<br/>clip + cloze + review.html"]
+  Export["Anki export"]
+
+  EvalAudio["eval_samples/audio"]
   EvalASR["Qwen3-Omni<br/>default (evals)"]
   EvalReport["eval_compare.html<br/>eval_compare_text.json"]
 
-  Sources -->|index| DB
-  ASRIndex -->|podcast transcripts + timing| DB
-  DB -->|mine| Clips --> Anki
+  Publish["publish_site.py"]
+  Site["Netlify<br/>brendanduke.ca"]
+  CDN["CloudFront + S3<br/>audio.brendanduke.ca"]
+
+  Sources --> YT
+  Sources --> Pod
+  YT -->|index| DB
+  Pod --> ASRIndex -->|transcripts + timing| DB
+  DB -->|mine| Clips --> Export
+  Align -->|word timings| Clips
   EvalAudio --> EvalASR -->|transcribe| EvalReport
+  Clips --> Publish
+  EvalReport --> Publish
+  Publish -->|HTML| Site
+  Publish -->|audio| CDN
 ```
 
 ## The trick
