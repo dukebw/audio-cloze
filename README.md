@@ -55,19 +55,19 @@ Recommended (uv, reproducible + isolated):
 python -m pip install --user uv
 
 # Create local venv + install base deps
-~/.local/bin/uv venv
-~/.local/bin/uv sync
+uv venv
+uv sync
 
 # Optional: ASR stack (Fun-ASR-Nano, GLM-ASR, WhisperX alignment)
-~/.local/bin/uv sync --extra asr
+uv sync --extra asr
 
 # Optional: MLX + Qwen3-Omni (Apple Silicon)
-~/.local/bin/uv sync --extra mlx
+uv sync --extra mlx
 ```
 
 Then run commands with:
 ```bash
-~/.local/bin/uv run python audio_vocab_miner.py index --sources sources.txt --db vocab.db
+uv run python audio_vocab_miner.py index --sources sources.txt --db vocab.db
 ```
 
 If you prefer pip:
@@ -96,7 +96,7 @@ unzip models/ggml-large-v3-encoder.mlmodelc.zip -d models/
 
 **Fun-ASR-Nano** (800M params, Chinese + dialects) + **GLM-ASR** (transformers, 1.5B params):
 ```bash
-~/.local/bin/uv sync --extra asr
+uv sync --extra asr
 ```
 The lockfile pins Transformers from git to ensure GLM-ASR's `glmasr` architecture is supported.
 First run downloads the Fun-ASR-Nano weights plus the Qwen3-0.6B LLM weights.
@@ -115,7 +115,7 @@ Use `GLM_ASR_PREFER_ENDPOINT=1` with `--glm-endpoint` to target an OpenAI-compat
 
 ## Usage
 
-If using uv, either activate `.venv` or prefix commands with `~/.local/bin/uv run`.
+If using uv, either activate `.venv` or prefix commands with `uv run`.
 
 ```bash
 # Index sources (YouTube + podcasts). Podcasts are fully transcribed.
