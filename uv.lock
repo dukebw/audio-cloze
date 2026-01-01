@@ -228,7 +228,6 @@ name = "audio-cloze"
 version = "0.1.0"
 source = { virtual = "." }
 dependencies = [
-    { name = "backports-lzma" },
     { name = "feedparser" },
     { name = "opencc-python-reimplemented" },
     { name = "pydub" },
@@ -259,7 +258,6 @@ mlx = [
 [package.metadata]
 requires-dist = [
     { name = "accelerate", marker = "extra == 'asr'", specifier = ">=0.28.0" },
-    { name = "backports-lzma", specifier = ">=0.0.14" },
     { name = "feedparser", specifier = ">=6.0.11" },
     { name = "funasr", marker = "extra == 'asr'", specifier = ">=1.1.10" },
     { name = "librosa", marker = "extra == 'mlx'", specifier = ">=0.10.2" },
@@ -316,12 +314,6 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/e2/23/612c0fd809444d04b8387a2dfd942ccc77829507bd78a387ff65a9d98c24/av-15.1.0-cp312-cp312-musllinux_1_2_x86_64.whl", hash = "sha256:8f383949b010c3e731c245f80351d19dc0c08f345e194fc46becb1cb279be3ff", size = 41150592, upload-time = "2025-08-30T04:40:17.951Z" },
     { url = "https://files.pythonhosted.org/packages/15/74/6f8e38a3b0aea5f28e72813672ff45b64615f2c69e6a4a558718c95edb9f/av-15.1.0-cp312-cp312-win_amd64.whl", hash = "sha256:d5921aa45f4c1f8c1a8d8185eb347e02aa4c3071278a2e2dd56368d54433d643", size = 31336093, upload-time = "2025-08-30T04:40:21.393Z" },
 ]
-
-[[package]]
-name = "backports-lzma"
-version = "0.0.14"
-source = { registry = "https://pypi.org/simple" }
-sdist = { url = "https://files.pythonhosted.org/packages/21/0f/1a9990233076d48aa2084100ba289ca162975e73a688f3a56c0ee2bb441a/backports.lzma-0.0.14.tar.gz", hash = "sha256:16d8b68e4d3cd4e6c9ddb059850452946da3914c8a8e197a7f2b0954559f2df4", size = 47108, upload-time = "2019-09-12T15:00:41.144Z" }
 
 [[package]]
 name = "certifi"

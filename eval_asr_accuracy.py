@@ -15,7 +15,6 @@ from pathlib import Path
 from typing import Callable, Optional
 import hashlib
 from asr_utils import (
-    ensure_lzma,
     funasr_transcribe,
     glm_asr_transcribe_transformers,
     mlx_whisper_transcribe,
@@ -517,7 +516,6 @@ def _parse_whispercpp_text(json_path: Path) -> str:
 
 def _init_whisperx():
     global _WHISPERX_PATCHED
-    ensure_lzma()
     import os as _os
     import numpy as _np
     import torch as _torch

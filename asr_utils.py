@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 from typing import Optional, Tuple
 
@@ -51,17 +50,17 @@ def resolve_torch_dtype(value: Optional[str]):
         return "auto"
 
 
-def ensure_lzma() -> bool:
+def require_lzma() -> None:
     try:
         import lzma  # noqa: F401
-        return True
-    except Exception:
-        try:
-            from backports import lzma as backports_lzma
-            sys.modules["lzma"] = backports_lzma
-            return True
-        except Exception:
-            return False
+    except Exception as e:
+        raise RuntimeError(
+            "Python was built without lzma support. Reinstall Python with liblzma "
+            "available (macOS/pyenv: `brew install xz` then rebuild Python)."
+        ) from e
+
+
+require_lzma()
 
 
 def ensure_qwen3_weights() -> Optional[Path]:
@@ -123,7 +122,6 @@ def patch_transformers_video_processor() -> bool:
 
 def _init_whisperx() -> None:
     global _WHISPERX_PATCHED
-    ensure_lzma()
     import os as _os
     import numpy as _np
     import torch as _torch
@@ -273,7 +271,6 @@ def _load_qwen3_omni_mlx(model_id: str):
         or _QWEN3_OMNI_MLX_PROCESSOR is None
         or _QWEN3_OMNI_MLX_MODEL_ID != model_id
     ):
-        ensure_lzma()
         patch_transformers_video_processor()
         from mlx_vlm import load as mlx_load
         model, processor = mlx_load(model_id)
@@ -440,7 +437,6 @@ def load_glm_asr_transformers(
     device_env: str = "GLM_ASR_DEVICE",
     dtype_env: str = "GLM_ASR_DTYPE",
 ) -> Tuple[object, object]:
-    ensure_lzma()
     from transformers import AutoModelForSeq2SeqLM, AutoProcessor
 
     dtype = resolve_torch_dtype(os.environ.get(dtype_env, "auto"))

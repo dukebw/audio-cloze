@@ -6,7 +6,6 @@ readme = "README.md"
 requires-python = ">=3.10,<3.13"
 
 dependencies = [
-  "backports.lzma>=0.0.14",
   "pydub>=0.25.1",
   "opencc-python-reimplemented>=0.1.7",
   "webvtt-py>=0.4.6",
