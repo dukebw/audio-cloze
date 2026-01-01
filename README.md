@@ -110,12 +110,12 @@ uv sync --extra asr
 The lockfile pins Transformers from git to ensure GLM-ASR's `glmasr` architecture is supported.
 First run downloads the Fun-ASR-Nano weights plus the Qwen3-0.6B LLM weights.
 
-If your Python build is missing `_lzma` (common with pyenv), install xz headers
-and then:
+This project requires a Python build with `lzma` support (common missing in pyenv builds).
+If you're using pyenv, rebuild after installing xz:
 ```bash
 brew install xz
-CFLAGS="-I/opt/homebrew/opt/xz/include" LDFLAGS="-L/opt/homebrew/opt/xz/lib" \
-  pip install backports.lzma
+CPPFLAGS="-I/opt/homebrew/opt/xz/include" LDFLAGS="-L/opt/homebrew/opt/xz/lib" \
+  PYTHON_CONFIGURE_OPTS="--with-lzma" pyenv install -f 3.12.12
 ```
 
 Set device/dtype via env vars, e.g. `GLM_ASR_DEVICE=mps` or `GLM_ASR_DTYPE=float16`.
