@@ -13,6 +13,16 @@ _WHISPERX_ALIGN_MODEL = None
 _WHISPERX_ALIGN_META = None
 _WHISPERX_ALIGN_LANGUAGE = None
 _WHISPERX_PATCHED = False
+_QWEN3_OMNI_MLX_MODEL = None
+_QWEN3_OMNI_MLX_PROCESSOR = None
+_QWEN3_OMNI_MLX_MODEL_ID = None
+_QWEN3_OMNI_MLX_UNSUPPORTED = False
+_FUNASR_MODEL = None
+_GLM_ASR_MODEL = None
+_GLM_ASR_PROCESSOR = None
+
+QWEN3_OMNI_PROMPT_ZH = "请逐字转写音频内容，英文单词保持英文拼写，不要音译或翻译。只输出转写文本。"
+QWEN3_OMNI_PROMPT_JA = "日本語の音声を書き起こしてください。英単語は英語のまま、翻訳しないでください。出力は書き起こしのみ。"
 
 
 def select_asr_device(env_var: str, default: str = "cpu") -> str:
@@ -221,6 +231,208 @@ def whisperx_align_tokens(audio_path: Path, transcript: str, language_code: str)
                     "score": word.get("score") or word.get("probability"),
                 })
     return tokens
+
+
+def mlx_whisper_transcribe(
+    audio_path: Path,
+    language: str,
+    word_timestamps: bool = False,
+) -> str:
+    try:
+        import mlx_whisper
+    except ImportError as e:
+        raise RuntimeError(f"mlx-whisper requires: {e}")
+    result = mlx_whisper.transcribe(
+        str(audio_path),
+        path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
+        language=language,
+        word_timestamps=word_timestamps,
+    )
+    return result.get("text", "").strip()
+
+
+def qwen3_omni_prompt(language: str) -> str:
+    override = os.environ.get("QWEN3_OMNI_PROMPT")
+    if override:
+        return override
+    if language == "zh":
+        return QWEN3_OMNI_PROMPT_ZH
+    if language == "ja":
+        return QWEN3_OMNI_PROMPT_JA
+    return "Please transcribe the audio into text."
+
+
+def qwen3_omni_max_new_tokens(default: int = 1024) -> int:
+    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", str(default)))
+
+
+def _load_qwen3_omni_mlx(model_id: str):
+    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR, _QWEN3_OMNI_MLX_MODEL_ID
+    if (
+        _QWEN3_OMNI_MLX_MODEL is None
+        or _QWEN3_OMNI_MLX_PROCESSOR is None
+        or _QWEN3_OMNI_MLX_MODEL_ID != model_id
+    ):
+        ensure_lzma()
+        patch_transformers_video_processor()
+        from mlx_vlm import load as mlx_load
+        model, processor = mlx_load(model_id)
+        if hasattr(model, "config") and hasattr(processor, "tokenizer"):
+            if not hasattr(model.config, "eos_token_id"):
+                model.config.eos_token_id = processor.tokenizer.eos_token_id
+        _QWEN3_OMNI_MLX_MODEL = model
+        _QWEN3_OMNI_MLX_PROCESSOR = processor
+        _QWEN3_OMNI_MLX_MODEL_ID = model_id
+    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
+
+
+def qwen3_omni_mlx_transcribe(
+    audio_path: Path,
+    *,
+    model_id: str,
+    language: str,
+    prompt: Optional[str] = None,
+    max_new_tokens: Optional[int] = None,
+) -> str:
+    global _QWEN3_OMNI_MLX_UNSUPPORTED
+    if os.environ.get("QWEN3_OMNI_DISABLE_MLX"):
+        raise RuntimeError("Qwen3-Omni MLX backend disabled via QWEN3_OMNI_DISABLE_MLX")
+    if _QWEN3_OMNI_MLX_UNSUPPORTED:
+        raise RuntimeError("Qwen3-Omni MLX backend unavailable (previous failure)")
+
+    model, processor = _load_qwen3_omni_mlx(model_id)
+    import librosa
+    import numpy as np
+    import mlx.core as mx
+
+    prompt_text = prompt or qwen3_omni_prompt(language)
+    conversation = [
+        {
+            "role": "user",
+            "content": [
+                {"type": "audio", "audio": "placeholder"},
+                {"type": "text", "text": prompt_text},
+            ],
+        }
+    ]
+    formatted = processor.apply_chat_template(
+        conversation,
+        tokenize=False,
+        add_generation_prompt=True,
+    )
+
+    sr = getattr(processor.feature_extractor, "sampling_rate", 16000)
+    audio, _ = librosa.load(str(audio_path), sr=sr)
+    processed = processor(
+        text=formatted,
+        audio=[audio],
+        padding=True,
+        return_attention_mask=True,
+        return_tensors=None,
+    )
+
+    input_ids = mx.array(processed["input_ids"])
+    feature_attention_mask = np.array(processed["feature_attention_mask"], dtype=np.int32)
+    audio_feature_lengths = np.sum(feature_attention_mask, axis=-1, dtype=np.int32)
+    input_features = np.array(processed["input_features"])
+
+    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
+    thinker_eos = getattr(model.config, "eos_token_id", None)
+    if thinker_eos is None:
+        thinker_eos = getattr(tokenizer, "eos_token_id", None)
+    try:
+        thinker_result, _ = model.generate(
+            input_ids,
+            return_audio=False,
+            thinker_max_new_tokens=max_new_tokens or qwen3_omni_max_new_tokens(),
+            thinker_temperature=0.0,
+            thinker_top_p=1.0,
+            thinker_eos_token_id=thinker_eos,
+            input_features=mx.array(input_features),
+            feature_attention_mask=mx.array(feature_attention_mask),
+            audio_feature_lengths=mx.array(audio_feature_lengths, dtype=mx.int32),
+        )
+    except Exception as e:
+        _QWEN3_OMNI_MLX_UNSUPPORTED = True
+        raise RuntimeError(
+            "Qwen3-Omni MLX failed. Ensure mlx-vlm >= 0.3.10 (GitHub) and "
+            f"audio decoding support are available. Error: {e}"
+        ) from e
+    sequences = thinker_result.sequences
+    prompt_len = input_ids.shape[1]
+    decoded = tokenizer.batch_decode(
+        sequences[:, prompt_len:].tolist(),
+        skip_special_tokens=True,
+        clean_up_tokenization_spaces=False,
+    )
+    return decoded[0].strip() if decoded else ""
+
+
+def funasr_transcribe(
+    audio_path: Path,
+    *,
+    model_id: str,
+    language: str,
+    device_env: str = "FUNASR_DEVICE",
+) -> str:
+    try:
+        from funasr import AutoModel
+        from funasr.models.fun_asr_nano import model as funasr_nano_model  # noqa: F401
+    except ImportError as e:
+        raise RuntimeError(f"funasr not installed: {e}")
+    ensure_qwen3_weights()
+    patch_funasr_load_in_8bit()
+    global _FUNASR_MODEL
+    if _FUNASR_MODEL is None:
+        device = select_asr_device(device_env)
+        _FUNASR_MODEL = AutoModel(
+            model=model_id,
+            device=device,
+            disable_update=True
+        )
+    res = _FUNASR_MODEL.generate(
+        input=[str(audio_path)],
+        cache={},
+        batch_size=1,
+        language=language,
+        itn=True
+    )
+    return res[0]["text"] if res else ""
+
+
+def glm_asr_transcribe_transformers(
+    audio_path: Path,
+    *,
+    model_id: str,
+    max_new_tokens_env: str = "GLM_ASR_MAX_NEW_TOKENS",
+) -> str:
+    global _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
+    if _GLM_ASR_MODEL is None or _GLM_ASR_PROCESSOR is None:
+        _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR = load_glm_asr_transformers(model_id)
+    model, processor = _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
+    inputs = processor.apply_transcription_request(str(audio_path))
+    dtype = getattr(model, "dtype", None)
+    if dtype is not None:
+        inputs = inputs.to(model.device, dtype=dtype)
+    else:
+        inputs = inputs.to(model.device)
+    try:
+        import torch
+        with torch.inference_mode():
+            outputs = model.generate(
+                **inputs,
+                do_sample=False,
+                max_new_tokens=int(os.environ.get(max_new_tokens_env, "512"))
+            )
+    except Exception:
+        outputs = model.generate(
+            **inputs,
+            do_sample=False,
+            max_new_tokens=int(os.environ.get(max_new_tokens_env, "512"))
+        )
+    prompt_len = inputs["input_ids"].shape[1]
+    decoded = processor.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
+    return decoded[0].strip() if decoded else ""
 
 
 def load_glm_asr_transformers(

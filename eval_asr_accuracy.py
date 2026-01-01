@@ -16,11 +16,10 @@ from typing import Callable, Optional
 import hashlib
 from asr_utils import (
     ensure_lzma,
-    ensure_qwen3_weights,
-    load_glm_asr_transformers,
-    patch_transformers_video_processor,
-    patch_funasr_load_in_8bit,
-    select_asr_device,
+    funasr_transcribe,
+    glm_asr_transcribe_transformers,
+    mlx_whisper_transcribe,
+    qwen3_omni_mlx_transcribe,
 )
 
 # Configuration
@@ -34,8 +33,6 @@ WHISPER_MODEL_PATH = Path(__file__).parent / "models" / "ggml-large-v3.bin"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 QWEN3_OMNI_MLX_MODEL_ID = "mlx-community/Qwen3-Omni-30B-A3B-Instruct-8bit"
-QWEN3_OMNI_PROMPT_ZH = "请逐字转写音频内容，英文单词保持英文拼写，不要音译或翻译。只输出转写文本。"
-QWEN3_OMNI_PROMPT_JA = "日本語の音声を書き起こしてください。英単語は英語のまま、翻訳しないでください。出力は書き起こしのみ。"
 DEFAULT_EVAL_DIR = Path(__file__).parent / "eval_samples"
 JP_EVAL_SUBDIR = "jp_4w0bjx3L_gw"
 JP_VIDEO_ID = "4w0bjx3L_gw"
@@ -52,12 +49,6 @@ ALIGNMENT_LANGUAGE = DEFAULT_LANGUAGE
 WHISPER_LANGUAGE = DEFAULT_LANGUAGE
 FUNASR_LANGUAGE = "中文"
 
-_FUNASR_MODEL = None
-_GLM_ASR_MODEL = None
-_GLM_ASR_PROCESSOR = None
-_QWEN3_OMNI_MLX_MODEL = None
-_QWEN3_OMNI_MLX_PROCESSOR = None
-_QWEN3_OMNI_MLX_UNSUPPORTED = False
 _WHISPERX_ALIGN_MODEL = None
 _WHISPERX_ALIGN_META = None
 _WHISPERX_ALIGN_LANGUAGE = None
@@ -714,21 +705,14 @@ def transcribe_whisper_cpp(audio_path: Path) -> TranscriptionResult:
 
 def transcribe_mlx_whisper(audio_path: Path) -> TranscriptionResult:
     """Transcribe with mlx-whisper."""
-    try:
-        import mlx_whisper
-    except ImportError:
-        return TranscriptionResult("mlx-whisper", "", 0, 0, error="mlx-whisper not installed")
-
     start = time.time()
     try:
-        result = mlx_whisper.transcribe(
-            str(audio_path),
-            path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
+        text = mlx_whisper_transcribe(
+            audio_path,
             language=WHISPER_LANGUAGE,
             word_timestamps=True,
         )
         elapsed = time.time() - start
-        text = result.get("text", "").strip()
         return TranscriptionResult("mlx-whisper", text, elapsed, len(text), alignments=None)
     except Exception as e:
         return TranscriptionResult("mlx-whisper", "", time.time() - start, 0, error=str(e))
@@ -736,168 +720,30 @@ def transcribe_mlx_whisper(audio_path: Path) -> TranscriptionResult:
 
 def transcribe_funasr(audio_path: Path) -> TranscriptionResult:
     """Transcribe with Fun-ASR-Nano."""
-    try:
-        from funasr import AutoModel
-        from funasr.models.fun_asr_nano import model as funasr_nano_model  # noqa: F401
-    except ImportError:
-        return TranscriptionResult("funasr-nano", "", 0, 0, error="funasr not installed")
-
     start = time.time()
     try:
-        ensure_qwen3_weights()
-        patch_funasr_load_in_8bit()
-        global _FUNASR_MODEL
-        if _FUNASR_MODEL is None:
-            device = select_asr_device("FUNASR_DEVICE")
-            _FUNASR_MODEL = AutoModel(
-                model=FUNASR_MODEL_ID,
-                device=device,
-                disable_update=True
-            )
-        res = _FUNASR_MODEL.generate(
-            input=[str(audio_path)],
-            cache={},
-            batch_size=1,
+        text = funasr_transcribe(
+            audio_path,
+            model_id=FUNASR_MODEL_ID,
             language=FUNASR_LANGUAGE,
-            itn=True
         )
         elapsed = time.time() - start
-        text = res[0]["text"] if res else ""
         return TranscriptionResult("funasr-nano", text, elapsed, len(text))
     except Exception as e:
         return TranscriptionResult("funasr-nano", "", time.time() - start, 0, error=str(e))
-
-
-def _load_glm_asr_transformers():
-    global _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
-    if _GLM_ASR_MODEL is None or _GLM_ASR_PROCESSOR is None:
-        _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR = load_glm_asr_transformers(GLM_ASR_MODEL_ID)
-    return _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
 
 
 def transcribe_glm_asr(audio_path: Path) -> TranscriptionResult:
     """Transcribe with GLM-ASR (transformers)."""
     start = time.time()
     try:
-        model, processor = _load_glm_asr_transformers()
-        inputs = processor.apply_transcription_request(str(audio_path))
-        dtype = getattr(model, "dtype", None)
-        if dtype is not None:
-            inputs = inputs.to(model.device, dtype=dtype)
-        else:
-            inputs = inputs.to(model.device)
-        try:
-            import torch
-            with torch.inference_mode():
-                outputs = model.generate(
-                    **inputs,
-                    do_sample=False,
-                    max_new_tokens=int(os.environ.get("GLM_ASR_MAX_NEW_TOKENS", "512"))
-                )
-        except Exception:
-            outputs = model.generate(
-                **inputs,
-                do_sample=False,
-                max_new_tokens=int(os.environ.get("GLM_ASR_MAX_NEW_TOKENS", "512"))
-            )
-        prompt_len = inputs["input_ids"].shape[1]
-        decoded = processor.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
-        text = decoded[0].strip() if decoded else ""
+        text = glm_asr_transcribe_transformers(
+            audio_path,
+            model_id=GLM_ASR_MODEL_ID,
+        )
         return TranscriptionResult("glm-asr", text, time.time() - start, len(text))
     except Exception as e:
         return TranscriptionResult("glm-asr", "", time.time() - start, 0, error=str(e))
-
-
-def qwen3_omni_prompt() -> str:
-    override = os.environ.get("QWEN3_OMNI_PROMPT")
-    if override:
-        return override
-    if EVAL_LANGUAGE == "zh":
-        return QWEN3_OMNI_PROMPT_ZH
-    if EVAL_LANGUAGE == "ja":
-        return QWEN3_OMNI_PROMPT_JA
-    return "Please transcribe the audio into text."
-
-
-def qwen3_omni_max_new_tokens() -> int:
-    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", "1024"))
-
-
-def _load_qwen3_omni_mlx():
-    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
-    if _QWEN3_OMNI_MLX_MODEL is None or _QWEN3_OMNI_MLX_PROCESSOR is None:
-        ensure_lzma()
-        patch_transformers_video_processor()
-        from mlx_vlm import load as mlx_load
-        model, processor = mlx_load(QWEN3_OMNI_MLX_MODEL_ID)
-        if hasattr(model, "config") and hasattr(processor, "tokenizer"):
-            if not hasattr(model.config, "eos_token_id"):
-                model.config.eos_token_id = processor.tokenizer.eos_token_id
-        _QWEN3_OMNI_MLX_MODEL = model
-        _QWEN3_OMNI_MLX_PROCESSOR = processor
-    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
-
-
-def _transcribe_qwen3_omni_mlx(audio_path: Path) -> str:
-    model, processor = _load_qwen3_omni_mlx()
-    import librosa
-    import numpy as np
-    import mlx.core as mx
-
-    prompt = qwen3_omni_prompt()
-    conversation = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "audio", "audio": "placeholder"},
-                {"type": "text", "text": prompt},
-            ],
-        }
-    ]
-    formatted = processor.apply_chat_template(
-        conversation,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    sr = getattr(processor.feature_extractor, "sampling_rate", 16000)
-    audio, _ = librosa.load(str(audio_path), sr=sr)
-    processed = processor(
-        text=formatted,
-        audio=[audio],
-        padding=True,
-        return_attention_mask=True,
-        return_tensors=None,
-    )
-
-    input_ids = mx.array(processed["input_ids"])
-    feature_attention_mask = np.array(processed["feature_attention_mask"], dtype=np.int32)
-    audio_feature_lengths = np.sum(feature_attention_mask, axis=-1, dtype=np.int32)
-    input_features = np.array(processed["input_features"])
-
-    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-    thinker_eos = getattr(model.config, "eos_token_id", None)
-    if thinker_eos is None:
-        thinker_eos = getattr(tokenizer, "eos_token_id", None)
-    thinker_result, _ = model.generate(
-        input_ids,
-        return_audio=False,
-        thinker_max_new_tokens=qwen3_omni_max_new_tokens(),
-        thinker_temperature=0.0,
-        thinker_top_p=1.0,
-        thinker_eos_token_id=thinker_eos,
-        input_features=mx.array(input_features),
-        feature_attention_mask=mx.array(feature_attention_mask),
-        audio_feature_lengths=mx.array(audio_feature_lengths, dtype=mx.int32),
-    )
-    sequences = thinker_result.sequences
-    prompt_len = input_ids.shape[1]
-    decoded = tokenizer.batch_decode(
-        sequences[:, prompt_len:].tolist(),
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )
-    return decoded[0].strip() if decoded else ""
 
 
 def transcribe_qwen3_omni(audio_path: Path) -> TranscriptionResult:
@@ -911,25 +757,15 @@ def transcribe_qwen3_omni(audio_path: Path) -> TranscriptionResult:
             0,
             error="Qwen3-Omni backend enabled for Mandarin/Japanese only",
         )
-    global _QWEN3_OMNI_MLX_UNSUPPORTED
-    if not os.environ.get("QWEN3_OMNI_DISABLE_MLX") and not _QWEN3_OMNI_MLX_UNSUPPORTED:
-        try:
-            text = _transcribe_qwen3_omni_mlx(audio_path)
-            return TranscriptionResult("qwen3-omni", text, time.time() - start, len(text))
-        except Exception as e:
-            _QWEN3_OMNI_MLX_UNSUPPORTED = True
-            error = (
-                "Qwen3-Omni MLX failed. Ensure mlx-vlm >= 0.3.10 (GitHub) and "
-                f"audio decoding support are available. Error: {e}"
-            )
-            return TranscriptionResult("qwen3-omni", "", time.time() - start, 0, error=error)
-    return TranscriptionResult(
-        "qwen3-omni",
-        "",
-        time.time() - start,
-        0,
-        error="Qwen3-Omni MLX backend disabled or unsupported",
-    )
+    try:
+        text = qwen3_omni_mlx_transcribe(
+            audio_path,
+            model_id=QWEN3_OMNI_MLX_MODEL_ID,
+            language=EVAL_LANGUAGE,
+        )
+        return TranscriptionResult("qwen3-omni", text, time.time() - start, len(text))
+    except Exception as e:
+        return TranscriptionResult("qwen3-omni", "", time.time() - start, 0, error=str(e))
 
 
 BACKEND_SPECS = [

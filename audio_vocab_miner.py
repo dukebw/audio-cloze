@@ -49,12 +49,10 @@ import hashlib
 import html
 import requests
 from asr_utils import (
-    ensure_lzma,
-    ensure_qwen3_weights,
-    load_glm_asr_transformers,
-    patch_transformers_video_processor,
-    patch_funasr_load_in_8bit,
-    select_asr_device,
+    funasr_transcribe,
+    glm_asr_transcribe_transformers,
+    mlx_whisper_transcribe,
+    qwen3_omni_mlx_transcribe,
     whisperx_align_tokens,
 )
 
@@ -1112,17 +1110,9 @@ def localize_word_in_chunk(audio_url: str, word: str, chunk_start: float,
 # Available backends: 'whispercpp', 'mlx_whisper', 'qwen3_omni', 'funasr_nano', 'glm_asr'
 DEFAULT_ASR_BACKEND = 'qwen3_omni'
 QWEN3_OMNI_MLX_MODEL_ID = "mlx-community/Qwen3-Omni-30B-A3B-Instruct-8bit"
-QWEN3_OMNI_PROMPT_ZH = "请逐字转写音频内容，英文单词保持英文拼写，不要音译或翻译。只输出转写文本。"
 FUNASR_MODEL_ID = "FunAudioLLM/Fun-ASR-Nano-2512"
 GLM_ASR_MODEL_ID = "zai-org/GLM-ASR-Nano-2512"
 GLM_ASR_ENDPOINT = "http://127.0.0.1:8000/v1"  # Optional OpenAI-compatible endpoint
-
-_QWEN3_OMNI_MLX_MODEL = None
-_QWEN3_OMNI_MLX_PROCESSOR = None
-_QWEN3_OMNI_MLX_UNSUPPORTED = False
-_FUNASR_MODEL = None
-_GLM_ASR_MODEL = None
-_GLM_ASR_PROCESSOR = None
 
 
 def get_cached_transcript(audio_path: Path, backend: str, conn: sqlite3.Connection) -> Optional[str]:
@@ -1184,188 +1174,39 @@ def transcribe_with_whisper_cpp(audio_path: Path) -> str:
 
 def transcribe_with_mlx_whisper(audio_path: Path) -> str:
     """Transcribe audio using mlx-whisper (text only)."""
-    try:
-        import mlx_whisper
-    except ImportError:
-        raise RuntimeError("mlx-whisper requires: pip install mlx-whisper")
-
     log.info(f"  Running mlx-whisper on {audio_path.name}...")
-    result = mlx_whisper.transcribe(
-        str(audio_path),
-        path_or_hf_repo="mlx-community/whisper-large-v3-mlx",
-        language="zh"
-    )
-    return result.get("text", "").strip()
-
-
-def qwen3_omni_prompt() -> str:
-    override = os.environ.get("QWEN3_OMNI_PROMPT")
-    if override:
-        return override
-    return QWEN3_OMNI_PROMPT_ZH
-
-
-def qwen3_omni_max_new_tokens() -> int:
-    return int(os.environ.get("QWEN3_OMNI_MAX_NEW_TOKENS", "1024"))
-
-
-def _load_qwen3_omni_mlx():
-    global _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
-    if _QWEN3_OMNI_MLX_MODEL is None or _QWEN3_OMNI_MLX_PROCESSOR is None:
-        ensure_lzma()
-        patch_transformers_video_processor()
-        from mlx_vlm import load as mlx_load
-        model, processor = mlx_load(QWEN3_OMNI_MLX_MODEL_ID)
-        if hasattr(model, "config") and hasattr(processor, "tokenizer"):
-            if not hasattr(model.config, "eos_token_id"):
-                model.config.eos_token_id = processor.tokenizer.eos_token_id
-        _QWEN3_OMNI_MLX_MODEL = model
-        _QWEN3_OMNI_MLX_PROCESSOR = processor
-    return _QWEN3_OMNI_MLX_MODEL, _QWEN3_OMNI_MLX_PROCESSOR
-
-
-def _transcribe_with_qwen3_omni_mlx(audio_path: Path) -> str:
-    model, processor = _load_qwen3_omni_mlx()
-    import librosa
-    import numpy as np
-    import mlx.core as mx
-
-    prompt = qwen3_omni_prompt()
-    conversation = [
-        {
-            "role": "user",
-            "content": [
-                {"type": "audio", "audio": "placeholder"},
-                {"type": "text", "text": prompt},
-            ],
-        }
-    ]
-    formatted = processor.apply_chat_template(
-        conversation,
-        tokenize=False,
-        add_generation_prompt=True,
-    )
-
-    sr = getattr(processor.feature_extractor, "sampling_rate", 16000)
-    audio, _ = librosa.load(str(audio_path), sr=sr)
-    processed = processor(
-        text=formatted,
-        audio=[audio],
-        padding=True,
-        return_attention_mask=True,
-        return_tensors=None,
-    )
-
-    input_ids = mx.array(processed["input_ids"])
-    feature_attention_mask = np.array(processed["feature_attention_mask"], dtype=np.int32)
-    audio_feature_lengths = np.sum(feature_attention_mask, axis=-1, dtype=np.int32)
-    input_features = np.array(processed["input_features"])
-
-    tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-    thinker_eos = getattr(model.config, "eos_token_id", None)
-    if thinker_eos is None:
-        thinker_eos = getattr(tokenizer, "eos_token_id", None)
-    thinker_result, _ = model.generate(
-        input_ids,
-        return_audio=False,
-        thinker_max_new_tokens=qwen3_omni_max_new_tokens(),
-        thinker_temperature=0.0,
-        thinker_top_p=1.0,
-        thinker_eos_token_id=thinker_eos,
-        input_features=mx.array(input_features),
-        feature_attention_mask=mx.array(feature_attention_mask),
-        audio_feature_lengths=mx.array(audio_feature_lengths, dtype=mx.int32),
-    )
-    sequences = thinker_result.sequences
-    prompt_len = input_ids.shape[1]
-    decoded = tokenizer.batch_decode(
-        sequences[:, prompt_len:].tolist(),
-        skip_special_tokens=True,
-        clean_up_tokenization_spaces=False,
-    )
-    return decoded[0].strip() if decoded else ""
+    return mlx_whisper_transcribe(audio_path, language="zh")
 
 
 def transcribe_with_qwen3_omni(audio_path: Path) -> str:
     """Transcribe audio using Qwen3-Omni via MLX (text only)."""
-    global _QWEN3_OMNI_MLX_UNSUPPORTED
-    if os.environ.get("QWEN3_OMNI_DISABLE_MLX"):
-        raise RuntimeError("Qwen3-Omni MLX backend disabled via QWEN3_OMNI_DISABLE_MLX")
-    if _QWEN3_OMNI_MLX_UNSUPPORTED:
-        raise RuntimeError("Qwen3-Omni MLX backend unavailable (previous failure)")
     try:
         log.info(f"  Running Qwen3-Omni (MLX) on {audio_path.name}...")
-        return _transcribe_with_qwen3_omni_mlx(audio_path)
-    except Exception as e:
-        _QWEN3_OMNI_MLX_UNSUPPORTED = True
-        raise RuntimeError(
-            "Qwen3-Omni MLX failed. Ensure mlx-vlm >= 0.3.10 (GitHub) and "
-            f"audio decoding support are available. Error: {e}"
+        return qwen3_omni_mlx_transcribe(
+            audio_path,
+            model_id=QWEN3_OMNI_MLX_MODEL_ID,
+            language="zh",
         )
+    except Exception as e:
+        raise RuntimeError(f"Qwen3-Omni MLX failed: {e}")
 
 
 def transcribe_with_funasr(audio_path: Path, language: str = "中文") -> str:
     """Transcribe audio using Fun-ASR-Nano (text only, no timestamps)."""
-    try:
-        from funasr import AutoModel
-        from funasr.models.fun_asr_nano import model as funasr_nano_model  # noqa: F401
-    except ImportError:
-        raise RuntimeError("Fun-ASR-Nano requires: pip install funasr")
-
     log.info(f"  Running Fun-ASR-Nano on {audio_path.name}...")
-    ensure_qwen3_weights()
-    patch_funasr_load_in_8bit()
-    global _FUNASR_MODEL
-    if _FUNASR_MODEL is None:
-        device = select_asr_device("FUNASR_DEVICE")
-        _FUNASR_MODEL = AutoModel(
-            model=FUNASR_MODEL_ID,
-            device=device,
-            disable_update=True
-        )
-    res = _FUNASR_MODEL.generate(
-        input=[str(audio_path)],
-        cache={},
-        batch_size=1,
+    return funasr_transcribe(
+        audio_path,
+        model_id=FUNASR_MODEL_ID,
         language=language,
-        itn=True
     )
-    return res[0]["text"] if res else ""
-
-
-def _load_glm_asr_transformers():
-    global _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
-    if _GLM_ASR_MODEL is None or _GLM_ASR_PROCESSOR is None:
-        _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR = load_glm_asr_transformers(GLM_ASR_MODEL_ID)
-    return _GLM_ASR_MODEL, _GLM_ASR_PROCESSOR
 
 
 def _transcribe_with_glm_asr_transformers(audio_path: Path) -> str:
-    model, processor = _load_glm_asr_transformers()
     log.info(f"  Running GLM-ASR (transformers) on {audio_path.name}...")
-    inputs = processor.apply_transcription_request(str(audio_path))
-    dtype = getattr(model, "dtype", None)
-    if dtype is not None:
-        inputs = inputs.to(model.device, dtype=dtype)
-    else:
-        inputs = inputs.to(model.device)
-    try:
-        import torch
-        with torch.inference_mode():
-            outputs = model.generate(
-                **inputs,
-                do_sample=False,
-                max_new_tokens=int(os.environ.get("GLM_ASR_MAX_NEW_TOKENS", "512"))
-            )
-    except Exception:
-        outputs = model.generate(
-            **inputs,
-            do_sample=False,
-            max_new_tokens=int(os.environ.get("GLM_ASR_MAX_NEW_TOKENS", "512"))
-        )
-    prompt_len = inputs["input_ids"].shape[1]
-    decoded = processor.batch_decode(outputs[:, prompt_len:], skip_special_tokens=True)
-    return decoded[0].strip() if decoded else ""
+    return glm_asr_transcribe_transformers(
+        audio_path,
+        model_id=GLM_ASR_MODEL_ID,
+    )
 
 
 def _transcribe_with_glm_asr_endpoint(audio_path: Path, endpoint: str) -> str:
